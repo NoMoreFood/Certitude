@@ -416,7 +416,7 @@ namespace Certitude
         internal static CertificateDetails Describe(byte[] encoded, OidNames names = null)
         {
             // Describe the certificate identity, keys, validity, and resolved identifiers.
-            names = names ?? OidNames.Windows;
+            names ??= OidNames.Windows;
             using (var certificate = new X509Certificate2(encoded))
             {
                 var detail = new CertificateDetails { Certificate = encoded, Oids = names };

@@ -188,17 +188,11 @@ namespace Certitude
         public static string RequestDisposition(int value)
         {
             // Distinguish pending and out-of-band issuance when labeling native outcomes.
-            switch (value)
+            return value switch
             {
-                case 0: return "Incomplete";
-                case 1: return "Failed";
-                case 2: return "Denied";
-                case 3: return "Issued";
-                case 4: return "Issued out of band";
-                case 5: return "Still pending";
-                case 6: return "Revoked";
-                default: return "Disposition " + value;
-            }
+                0 => "Incomplete", 1 => "Failed", 2 => "Denied", 3 => "Issued", 4 => "Issued out of band",
+                5 => "Still pending", 6 => "Revoked", _ => "Disposition " + value
+            };
         }
 
         public static string Submit(string config, string path, string attributes)
@@ -244,17 +238,15 @@ namespace Certitude
         public static object ParseValue(string text, int type)
         {
             // Convert edited property text into the native type required by the CA API.
-            switch (type)
+            return type switch
             {
-                case 1: return text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ?
-                    Convert.ToInt32(text.Substring(2), 16) : int.Parse(text, CultureInfo.InvariantCulture);
-                case 2: return DateTime.Parse(text, CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
-                case 3: return Convert.FromBase64String(text);
-                case 4: return text;
-                case 5: return text.Replace("\r", "").Split('\n');
-                default: throw new ArgumentException("Unknown value type.");
-            }
+                1 => text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ?
+                    Convert.ToInt32(text.Substring(2), 16) : int.Parse(text, CultureInfo.InvariantCulture),
+                2 => DateTime.Parse(text, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal),
+                3 => Convert.FromBase64String(text), 4 => text, 5 => text.Replace("\r", "").Split('\n'),
+                _ => throw new ArgumentException("Unknown value type.")
+            };
         }
 
         public static string Service(string config, string operation)

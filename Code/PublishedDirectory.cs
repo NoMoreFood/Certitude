@@ -58,7 +58,7 @@ namespace Certitude
         public string Thumbprint => Certificate?.Thumbprint ?? Fingerprint;
         public DateTime? Expires => Certificate?.NotAfter;
         public string Status => Certificate?.Validity ?? "Unreadable";
-        public string PairSide => Direction == 0 ? "Forward" : Direction == 1 ? "Reverse" : "";
+        public string PairSide => Direction switch { 0 => "Forward", 1 => "Reverse", _ => "" };
         public string Key => Object.Id + "/" + Fingerprint + "/" + Direction;
     }
 

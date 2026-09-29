@@ -9,6 +9,23 @@ Licensed under GPLv3. See LICENSE.md.
         Width="1280" Height="820" MinWidth="900" MinHeight="620" WindowStartupLocation="CenterScreen"
         Style="{StaticResource {x:Type Window}}"
         Loaded="WindowLoaded" Closing="WindowClosing" PreviewKeyDown="WindowKeyDown">
+  <Window.Resources>
+    <Style x:Key="WorkspaceIconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Width" Value="32" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="Padding" Value="4,3" />
+      <Setter Property="Content" Value="" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="ContentTemplate">
+        <Setter.Value>
+          <DataTemplate>
+            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center"
+                       Text="{Binding (local:Glyphs.Icon), RelativeSource={RelativeSource AncestorType=Button}}" />
+          </DataTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
   <DockPanel>
     <Border DockPanel.Dock="Top" Background="{DynamicResource Header}" Padding="10,7">
       <DockPanel>
@@ -71,6 +88,9 @@ Licensed under GPLv3. See LICENSE.md.
               <ListBoxItem Content="Denied Requests" Tag="31" local:Glyphs.Icon="{x:Static local:Glyphs.Cancel}" />
               <ListBoxItem Content="All Records" Tag="" local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
             </ListBox>
+            <TextBlock x:Name="PinnedViewsLabel" Text="Pinned Views" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Muted}" Margin="4,12,0,5" Visibility="Collapsed" />
+            <StackPanel x:Name="PinnedViewsPanel" />
             <TextBlock Text="Tools" FontSize="10" FontWeight="SemiBold"
                        Foreground="{DynamicResource Muted}" Margin="4,12,0,5" />
             <Button x:Name="CertificateManagerButton" Content="Certificate _Manager" Click="CertificateToolsClick"
@@ -90,6 +110,14 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="StatisticsButton" Content="_Statistics" Click="StatisticsClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Statistics}" />
+            <Button x:Name="NativeCaButton" Content="Native CA MMC" Click="NativeCaClick"
+                    HorizontalContentAlignment="Left" Margin="0,8,0,4"
+                    ToolTip="Open the Windows Certification Authority console; select its target independently."
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
+            <Button x:Name="NativeTemplatesButton" Content="Native Templates MMC" Click="NativeTemplatesClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4"
+                    ToolTip="Open the Windows Certificate Templates console using your Windows identity."
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
             <TextBlock Text="Windows Authentication" FontSize="10"
                        Foreground="{DynamicResource Muted}" Margin="4,8,0,0" />
           </StackPanel>
@@ -109,13 +137,30 @@ Licensed under GPLv3. See LICENSE.md.
             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
             <RowDefinition Height="*" /><RowDefinition Height="Auto" />
           </Grid.RowDefinitions>
-          <DockPanel Margin="0,0,0,6">
-            <TextBlock x:Name="ViewTitle" Text="Issued Certificates" FontSize="17" FontWeight="SemiBold" />
-            <TextBlock x:Name="TargetText" Text="No Authority Selected" Foreground="{DynamicResource Muted}"
-                       Margin="12,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-          </DockPanel>
+          <StackPanel Margin="0,0,0,6">
+            <DockPanel>
+              <TextBlock x:Name="ViewTitle" Text="Issued Certificates" FontSize="17" FontWeight="SemiBold" />
+              <TextBlock x:Name="TargetText" Text="No Authority Selected" Foreground="{DynamicResource Muted}"
+                         Margin="12,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+            </DockPanel>
+            <WrapPanel Margin="0,6,0,0">
+              <TextBlock Text="Saved View" VerticalAlignment="Center" Margin="0,0,6,4" />
+              <ComboBox x:Name="SavedViewsBox" Width="210" Margin="0,0,6,4" DisplayMemberPath="Name"
+                        SelectionChanged="SavedViewSelected" AutomationProperties.Name="Saved View" />
+              <Button x:Name="OpenViewButton" Style="{StaticResource WorkspaceIconButton}" Margin="0,0,4,4" Click="OpenViewClick"
+                      ToolTip="Open saved view" AutomationProperties.Name="Open saved view"
+                      local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
+              <Button x:Name="SaveViewButton" Style="{StaticResource WorkspaceIconButton}" Margin="0,0,4,4" Click="SaveViewClick"
+                      ToolTip="Save current view" AutomationProperties.Name="Save current view"
+                      local:Glyphs.Icon="{x:Static local:Glyphs.Save}" />
+              <Button x:Name="ManageViewsButton" Style="{StaticResource WorkspaceIconButton}" Margin="0,0,4,4" Click="ManageViewsClick"
+                      ToolTip="Manage saved views and connections" AutomationProperties.Name="Manage saved views and connections"
+                      local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />
+            </WrapPanel>
+            <TextBlock x:Name="WorkspaceNotice" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,3,0,0" />
+          </StackPanel>
           <Border Grid.Row="1" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
-                  BorderThickness="1" Padding="6" Margin="0,0,0,10">
+                  BorderThickness="1" Padding="6" Margin="0,0,0,15">
             <StackPanel x:Name="FilterPanel" IsEnabled="False">
               <Grid>
                 <Grid.ColumnDefinitions>

@@ -132,7 +132,7 @@ namespace Certitude
             saveCrl = Dialogs.Button(actions, "_Save CRL…", async () =>
             {
                 // Save the selected inspected CRL using its original encoded bytes.
-                if (!(downloaded.SelectedItem is CrlResult selected)) return;
+                if (downloaded.SelectedItem is not CrlResult selected) return;
                 var save = new FilePicker(true) { FileName = selected.IsDelta ? "delta.crl" : "base.crl", Filter = "CRL|*.crl" };
                 if (await save.ShowAsync() != true) return;
                 try { File.WriteAllBytes(save.FileName, selected.Encoded); }
@@ -229,7 +229,7 @@ namespace Certitude
             {
                 // Validate the certificate and timeout before capturing the remaining options.
                 if (certificate == null) throw new ArgumentException("Open a certificate first.");
-                if (!int.TryParse(timeout.Text, out var seconds) || seconds < 1 || seconds > 120)
+                if (!int.TryParse(timeout.Text, out var seconds) || seconds is < 1 or > 120)
                     throw new ArgumentException("Set the retrieval timeout to 1–120 seconds.");
                 var issuers = Paths(issuerFiles.Text);
                 var crls = Paths(crlFiles.Text);

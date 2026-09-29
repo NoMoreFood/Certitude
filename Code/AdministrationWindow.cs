@@ -295,7 +295,7 @@ namespace Certitude
                 var delta = exportKind.SelectedIndex == 1;
                 var report = await Task.Run(() => CertificateValidation.InspectCrl(
                     CaAdministration.ReadCrl(config, delta, number), config + " · index " + number, null,
-                    new X509Certificate2[0], oidNames.Value.Refresh()).Details);
+                    Array.Empty<X509Certificate2>(), oidNames.Value.Refresh()).Details);
                 Dialogs.Report(this, "CA CRL", report);
                 Done("CA CRL metadata loaded.");
             });
@@ -356,7 +356,7 @@ namespace Certitude
                 var number = int.Parse(index.Text);
                 var kind = type.SelectedIndex + 1;
                 var data = CaAdministration.ParseValue(value.Text, kind);
-                if (!new[] { 23, 24, 25, 26, 29 }.Contains(id))
+                if (id is not (23 or 24 or 25 or 26 or 29))
                     throw new ArgumentException("This CA property is read-only.");
 
                 // Confirm the property change before marshaling its typed value to the CA.
@@ -402,9 +402,8 @@ namespace Certitude
                 var entry = name.Text.Trim();
                 var data = await Task.Run(() => CaAdministration.Use(config,
                     admin => admin.GetConfigEntry(config, path, entry)));
-                type.SelectedIndex = data is int ? 0 : data is DateTime ? 1 :
-                    data is byte[] ? 2 : data is Array ? 4 : 3;
-                value.Text = data is Array array && !(data is byte[]) ?
+                type.SelectedIndex = data switch { int => 0, DateTime => 1, byte[] => 2, Array => 4, _ => 3 };
+                value.Text = data is Array array and not byte[] ?
                     string.Join(Environment.NewLine, array.Cast<object>().Select(CertificateStore.Format)) :
                     CertificateStore.Format(data);
                 Done("Configuration entry loaded.");

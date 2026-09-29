@@ -31,7 +31,12 @@ namespace Certitude
         private OidDirectory directory;
         private DirectoryOid[] rows = Array.Empty<DirectoryOid>();
         private bool initialized;
-        internal bool IsBusy { get; private set; }
+        internal bool IsBusy
+        {
+            get;
+            // Keep directory controls disabled for the complete lifetime of an operation.
+            private set { field = value; layout.IsEnabled = !value; }
+        }
 
         public OidManagerPage(Action<string> log = null)
         {
@@ -62,7 +67,7 @@ namespace Certitude
             Dialogs.Button(actions, "_Copy OID", () => Dialogs.CopyText((grid.SelectedItem as DirectoryOid)?.Value));
 
             // Combine the OID type filter with a text search across policy metadata.
-            var filters = new DockPanel { Margin = new Thickness(0, 6, 0, 10) };
+            var filters = new DockPanel { Margin = new Thickness(0, 6, 0, 15) };
             DockPanel.SetDock(kind, Dock.Right);
             kind.Margin = new Thickness(6, 0, 0, 0);
             kind.ItemsSource = new[] { "All OIDs", "Application Policy", "Issuance Policy", "Certificate Template",
@@ -183,7 +188,6 @@ namespace Certitude
             if (IsBusy) return;
             using var cursor = BusyCursor.Enter();
             IsBusy = true;
-            layout.IsEnabled = false;
             status.Text = message;
             try { await action(); }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
@@ -191,7 +195,6 @@ namespace Certitude
             {
                 // Restore interaction and selection state after success or failure.
                 IsBusy = false;
-                layout.IsEnabled = true;
                 SelectionChanged();
                 record(status.Text);
             }
@@ -203,7 +206,7 @@ namespace Certitude
                 // Capture the requested target and clear results before the asynchronous lookup.
                 var previous = reconnect ? null : directory;
                 var requested = server.Text.Trim();
-                selected = selected ?? (reconnect ? null : (grid.SelectedItem as DirectoryOid)?.Id);
+                selected ??= reconnect ? null : (grid.SelectedItem as DirectoryOid)?.Id;
                 directory = null;
                 rows = Array.Empty<DirectoryOid>();
                 grid.ItemsSource = null;
@@ -232,7 +235,7 @@ namespace Certitude
         {
             // Require a removable selection and confirm its directory identity and impact.
             if (IsBusy || directory == null ||
-                !(grid.SelectedItem is DirectoryOid selected) || !selected.CanRemove) return;
+                grid.SelectedItem is not DirectoryOid selected || !selected.CanRemove) return;
             var connection = directory;
             if (!await Dialogs.Confirm(this, "Remove OID From Active Directory",
                 "Domain Controller: " + connection.Server + "\r\nForest: " + connection.ConfigurationName +

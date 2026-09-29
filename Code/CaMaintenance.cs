@@ -35,43 +35,43 @@ namespace Certitude
         public static string Caption(MaintenanceOperation operation)
         {
             // Keep action labels consistent between selection, review, and result reporting.
-            switch (operation)
+            return operation switch
             {
-                case MaintenanceOperation.Health: return "Check CA Connectivity";
-                case MaintenanceOperation.BackupDatabase: return "Back Up Database";
-                case MaintenanceOperation.BackupAndLogs: return "Back Up And Truncate Logs";
-                case MaintenanceOperation.BackupCa: return "Back Up CA And Private Key";
-                case MaintenanceOperation.Configuration: return "Export CA Configuration";
-                case MaintenanceOperation.Integrity: return "Check Database Integrity";
-                case MaintenanceOperation.Compact: return "Compact Database";
-                default: throw new ArgumentOutOfRangeException(nameof(operation));
-            }
+                MaintenanceOperation.Health => "Check CA Connectivity",
+                MaintenanceOperation.BackupDatabase => "Back Up Database",
+                MaintenanceOperation.BackupAndLogs => "Back Up And Truncate Logs",
+                MaintenanceOperation.BackupCa => "Back Up CA And Private Key",
+                MaintenanceOperation.Configuration => "Export CA Configuration",
+                MaintenanceOperation.Integrity => "Check Database Integrity",
+                MaintenanceOperation.Compact => "Compact Database",
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
         }
 
         public static string Description(MaintenanceOperation operation)
         {
             // Describe maintenance effects and recovery expectations before user approval.
-            switch (operation)
+            return operation switch
             {
-                case MaintenanceOperation.Health:
-                    return "Check the selected CA's request and administration interfaces, then read CA information.";
-                case MaintenanceOperation.BackupDatabase:
-                    return "Create a full online database backup and export CA configuration. Preserve transaction logs.";
-                case MaintenanceOperation.BackupAndLogs:
-                    return "Create a full online database backup and let Certificate Services truncate backed-up logs.";
-                case MaintenanceOperation.BackupCa:
-                    return "Back up the database, CA signing certificate and exportable private key with password protection. " +
-                        "Export CA configuration and preserve transaction logs. HSM keys require their provider's backup tools.";
-                case MaintenanceOperation.Configuration:
-                    return "Export the local CA's registry configuration for recovery. This does not include private keys.";
-                case MaintenanceOperation.Integrity:
-                    return "Temporarily stop Certificate Services and check the active database with Windows ESE. " +
-                        "This check does not repair or delete records.";
-                case MaintenanceOperation.Compact:
-                    return "Back up the database and configuration, then stop Certificate Services and reclaim unused " +
-                        "database space with Windows ESE. Retain all records and a copy of the original database.";
-                default: throw new ArgumentOutOfRangeException(nameof(operation));
-            }
+                MaintenanceOperation.Health =>
+                    "Check the selected CA's request and administration interfaces, then read CA information.",
+                MaintenanceOperation.BackupDatabase =>
+                    "Create a full online database backup and export CA configuration. Preserve transaction logs.",
+                MaintenanceOperation.BackupAndLogs =>
+                    "Create a full online database backup and let Certificate Services truncate backed-up logs.",
+                MaintenanceOperation.BackupCa =>
+                    "Back up the database, CA signing certificate and exportable private key with password protection. " +
+                    "Export CA configuration and preserve transaction logs. HSM keys require their provider's backup tools.",
+                MaintenanceOperation.Configuration =>
+                    "Export the local CA's registry configuration for recovery. This does not include private keys.",
+                MaintenanceOperation.Integrity =>
+                    "Temporarily stop Certificate Services and check the active database with Windows ESE. " +
+                    "This check does not repair or delete records.",
+                MaintenanceOperation.Compact =>
+                    "Back up the database and configuration, then stop Certificate Services and reclaim unused " +
+                    "database space with Windows ESE. Retain all records and a copy of the original database.",
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
         }
 
         internal static void ValidateLocalTarget(string configuration)

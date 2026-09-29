@@ -187,9 +187,8 @@ namespace Certitude
                     // Display the complete failure in the active tool and a concise status message.
                     var messageText = CaAdministration.Error(error);
                     status.Text = messageText.Replace("\r", "").Split('\n')[0];
-                    var output = tabs.SelectedIndex == 0 ? details :
-                        tabs.SelectedIndex == 1 ? tlsOutput : enrollmentOutput;
-                    output.Text = "Operation failed\r\n\r\n" + messageText;
+                    var output = tabs.SelectedIndex switch { 0 => details, 1 => tlsOutput, _ => enrollmentOutput };
+                    output?.Text = "Operation failed\r\n\r\n" + messageText;
                 }
                 finally
                 {
@@ -221,7 +220,7 @@ namespace Certitude
             header.Children.Add(source);
 
             // Place text, expiry, and private-key filters above the inventory actions.
-            var filters = new WrapPanel { Margin = new Thickness(0, 6, 0, 6) };
+            var filters = new WrapPanel { Margin = new Thickness(0, 6, 0, 9) };
             header.Children.Add(filters);
             Label(filters, "Search subject, SAN, issuer, EKU or thumbprint", search);
             Label(filters, "Expiry", validity);
@@ -284,7 +283,7 @@ namespace Certitude
             {
                 // Open the native viewer only for a double-click on one selected certificate row.
                 if (cancellation != null || inventory.SelectedItems.Count != 1 ||
-                    !(ItemsControl.ContainerFromElement(inventory, e.OriginalSource as DependencyObject) is DataGridRow)) return;
+                    ItemsControl.ContainerFromElement(inventory, e.OriginalSource as DependencyObject) is not DataGridRow) return;
                 e.Handled = true;
                 ViewInWindows();
             };
@@ -353,17 +352,11 @@ namespace Certitude
                 }
             }
             // Hide store-only actions when browsing a file or filtering out private keys.
-            Dialogs.FilterMenu(inventory.ContextMenu, item =>
+            Dialogs.FilterMenu(inventory.ContextMenu, item => (string)item.Tag switch
             {
-                switch ((string)item.Tag)
-                {
-                    case "Key": return loadedStore != null && keys.SelectedIndex != 2;
-                    case "Name":
-                    case "Transfer":
-                    case "Remove":
-                    case "Reload": return loadedStore != null;
-                    default: return true;
-                }
+                "Key" => loadedStore != null && keys.SelectedIndex != 2,
+                "Name" or "Transfer" or "Remove" or "Reload" => loadedStore != null,
+                _ => true
             });
         }
 

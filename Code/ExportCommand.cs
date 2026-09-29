@@ -71,7 +71,7 @@ namespace Certitude
         public static ExportField[] Select(string[] names)
         {
             // Expand default or wildcard selections and reject empty or repeated output columns.
-            if (names == null) names = Defaults;
+            names ??= Defaults;
             if (names.Length == 1 && names[0].Trim() == "*") return All;
             var fields = names.Select(Find).ToArray();
             if (fields.Length == 0 || fields.Select(field => field.Name).Distinct().Count() != fields.Length)
@@ -102,13 +102,13 @@ namespace Certitude
                 Field = ExportField.Find(match.Groups["field"].Value),
                 Operator = Regex.Replace(match.Groups["op"].Value.ToLowerInvariant(), @"\s+", " ")
             };
-            if (condition.Operator == "is null" || condition.Operator == "is not null") return condition;
+            if (condition.Operator is "is null" or "is not null") return condition;
 
             // Unquote literal values and reject operators incompatible with the selected field type.
             var value = match.Groups["value"].Value;
             if (value.Length >= 2 && (value[0] == '\'' || value[0] == '"') && value[0] == value[value.Length - 1])
                 value = value.Substring(1, value.Length - 2);
-            var textOperator = new[] { "contains", "startswith", "endswith" }.Contains(condition.Operator);
+            var textOperator = condition.Operator is "contains" or "startswith" or "endswith";
             if (condition.Field.Type != typeof(string) && textOperator || condition.Field.Type == typeof(string) &&
                 !textOperator && condition.Operator != "=" && condition.Operator != "!=")
                 throw new ArgumentException("Operator '" + condition.Operator +
@@ -186,15 +186,11 @@ namespace Certitude
             // Exclude absent numeric or date values, then apply their typed ordering relation.
             if (actual == null) return false;
             var comparison = ((IComparable)actual).CompareTo(Value);
-            switch (Operator)
+            return Operator switch
             {
-                case "=": return comparison == 0;
-                case "!=": return comparison != 0;
-                case ">": return comparison > 0;
-                case ">=": return comparison >= 0;
-                case "<": return comparison < 0;
-                default: return comparison <= 0;
-            }
+                "=" => comparison == 0, "!=" => comparison != 0, ">" => comparison > 0,
+                ">=" => comparison >= 0, "<" => comparison < 0, _ => comparison <= 0
+            };
         }
     }
 
@@ -212,7 +208,7 @@ namespace Certitude
         {
             // Recognize help or export mode before processing options that require a destination.
             var command = new ExportCommand();
-            if (args.Length == 1 && new[] { "--help", "-h", "/?" }.Contains(args[0].ToLowerInvariant()))
+            if (args.Length == 1 && args[0].ToLowerInvariant() is "--help" or "-h" or "/?")
             { command.Help = true; return command; }
             if (args.Length == 0 || !args[0].Equals("export", StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException(
@@ -231,7 +227,7 @@ namespace Certitude
                 if (option == "--force") { command.Force = true; continue; }
 
                 // Consume only supported valued options and accumulate repeated conditions as an AND filter.
-                if (!new[] { "--ca", "--output", "--fields", "--where" }.Contains(option))
+                if (option is not ("--ca" or "--output" or "--fields" or "--where"))
                     throw new ArgumentException("Unknown option: " + args[i]);
                 if (++i == args.Length || args[i].StartsWith("--", StringComparison.Ordinal))
                     throw new ArgumentException("Missing value for " + option + ".");
@@ -276,14 +272,14 @@ namespace Certitude
             foreach (var condition in Conditions.Where(item => item.Field.Name == "NotAfter" && item.Value != null))
             {
                 var date = (DateTime)condition.Value;
-                if (new[] { "=", ">", ">=" }.Contains(condition.Operator) &&
+                if (condition.Operator is "=" or ">" or ">=" &&
                     (!query.ExpiresFrom.HasValue || date > query.ExpiresFrom)) query.ExpiresFrom = date;
                 if (condition.Operator == "<=" || condition.Operator == "=")
                 {
                     if (date == DateTime.MaxValue) continue;
                     date = date.AddTicks(1);
                 }
-                if (new[] { "=", "<", "<=" }.Contains(condition.Operator) &&
+                if (condition.Operator is "=" or "<" or "<=" &&
                     (!query.ExpiresBefore.HasValue || date < query.ExpiresBefore)) query.ExpiresBefore = date;
             }
             // Leave contradictory predicates to final matching instead of constructing an invalid CA range.
@@ -348,8 +344,8 @@ namespace Certitude
             // Attach to the caller console without replacing handles already redirected to files or pipes.
             var stdout = GetStdHandle(-11);
             var stderr = GetStdHandle(-12);
-            var redirectedOut = new uint[] { 1, 3 }.Contains(GetFileType(stdout));
-            var redirectedError = new uint[] { 1, 3 }.Contains(GetFileType(stderr));
+            var redirectedOut = GetFileType(stdout) is 1 or 3;
+            var redirectedError = GetFileType(stderr) is 1 or 3;
             AttachConsole(uint.MaxValue);
             if (redirectedOut) SetStdHandle(-11, stdout);
             if (redirectedError) SetStdHandle(-12, stderr);

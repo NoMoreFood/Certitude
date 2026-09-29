@@ -257,7 +257,7 @@ namespace Certitude
         public TemplateIdentity Template(string value)
         {
             // Use directory template identities or cache a fallback for unknown values.
-            value = value ?? "";
+            value ??= "";
             if (templates.TryGetValue(value, out var template)) return template;
             return templateCache.GetOrAdd(value, key =>
             {

@@ -42,7 +42,7 @@ namespace Certitude
             try
             {
                 // Use ordinary marshaling unless the CA API requires a binary BSTR.
-                if (!(value is byte[] bytes) || !binaryString)
+                if (value is not byte[] bytes || !binaryString)
                 {
                     Marshal.GetNativeVariantForObject(value, Pointer);
                     return;

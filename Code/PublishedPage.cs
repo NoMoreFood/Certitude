@@ -33,7 +33,12 @@ namespace Certitude
         private PublishedStore loadedStore;
         private PublishedSnapshot snapshot = new PublishedSnapshot();
         private bool initialized;
-        internal bool IsBusy { get; private set; }
+        internal bool IsBusy
+        {
+            get;
+            // Keep publication controls disabled while directory reads or writes are in progress.
+            private set { field = value; layout.IsEnabled = !value; }
+        }
 
         public PublishedPage(Action<string> log = null)
         {
@@ -66,7 +71,7 @@ namespace Certitude
             export = Dialogs.Button(actions, "_Export", async () => await Export());
 
             // Combine store selection with text filtering of the loaded publication snapshot.
-            var filters = new DockPanel { Margin = new Thickness(0, 6, 0, 10) };
+            var filters = new DockPanel { Margin = new Thickness(0, 6, 0, 15) };
             DockPanel.SetDock(stores, Dock.Left);
             stores.Margin = new Thickness(0, 0, 8, 0);
             stores.ItemsSource = PublishedDirectory.Stores;
@@ -169,7 +174,7 @@ namespace Certitude
         private void Filter(string selected = null)
         {
             // Filter cached certificates while retaining a stable selected publication key.
-            selected = selected ?? (grid.SelectedItem as PublishedCertificate)?.Key;
+            selected ??= (grid.SelectedItem as PublishedCertificate)?.Key;
             var text = search.Text.Trim();
             var rows = snapshot.Certificates.Where(row => new[] { row.Subject, row.Issuer, row.Thumbprint,
                 row.Status, row.Object.Name, row.Object.DistinguishedName, row.PairSide }.Any(value =>
@@ -210,7 +215,6 @@ namespace Certitude
             if (IsBusy) return;
             using var cursor = BusyCursor.Enter();
             IsBusy = true;
-            layout.IsEnabled = false;
             status.Text = message;
             try { await action(); }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
@@ -218,7 +222,6 @@ namespace Certitude
             {
                 // Restore the page and selected-row actions after each directory operation.
                 IsBusy = false;
-                layout.IsEnabled = true;
                 SelectionChanged();
                 record(status.Text);
             }
@@ -238,7 +241,7 @@ namespace Certitude
             target.Text = "";
 
             // Publish a complete snapshot after the directory lookup finishes.
-            connection = connection ?? await Task.Run(() => PublishedDirectory.Connect(requested));
+            connection ??= await Task.Run(() => PublishedDirectory.Connect(requested));
             snapshot = await Task.Run(() => connection.Read(store));
             directory = connection;
             loadedStore = store;
@@ -261,7 +264,7 @@ namespace Certitude
         private async Task Remove()
         {
             // Confirm removal using the exact publication location and its forest-wide effect.
-            if (!remove.IsEnabled || !(grid.SelectedItem is PublishedCertificate row)) return;
+            if (!remove.IsEnabled || grid.SelectedItem is not PublishedCertificate row) return;
             var connection = directory;
             if (!await Dialogs.Confirm(this, "Remove Published Certificate", "Domain Controller: " + connection.Server +
                 "\r\n\r\n" + row.Store.Effect + "\r\n\r\nRemove this certificate from this AD publication? " +
@@ -319,7 +322,12 @@ namespace Certitude
         private readonly PublishedDirectory directory;
         private readonly PublishedStore store;
         private byte[] certificate;
-        internal bool IsBusy { get; private set; }
+        internal bool IsBusy
+        {
+            get;
+            // Keep preview and publication controls disabled through review and directory writes.
+            private set { field = value; layout.IsEnabled = !value; }
+        }
 
         public PublishCertificatePage(PublishedDirectory directory, PublishedStore store,
             PublishedObject[] objects, string selected)
@@ -381,7 +389,6 @@ namespace Certitude
             if (IsBusy) return;
             using var cursor = BusyCursor.Enter();
             IsBusy = true;
-            layout.IsEnabled = false;
             certificate = null;
             preview.Clear();
             try
@@ -410,7 +417,7 @@ namespace Certitude
                 status.Text = "Certificate Loaded. Review The Publication Target Before Adding It To AD.";
             }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
-            finally { IsBusy = false; layout.IsEnabled = true; }
+            finally { IsBusy = false; }
         }
 
         private async Task Publish()
@@ -419,7 +426,6 @@ namespace Certitude
             if (IsBusy) return;
             using var cursor = BusyCursor.Enter();
             IsBusy = true;
-            layout.IsEnabled = false;
             var published = false;
             try
             {
@@ -437,7 +443,7 @@ namespace Certitude
                 published = true;
             }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
-            finally { IsBusy = false; layout.IsEnabled = true; }
+            finally { IsBusy = false; }
             if (published) DialogResult = true;
         }
     }

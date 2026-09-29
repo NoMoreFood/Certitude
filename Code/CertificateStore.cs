@@ -110,20 +110,12 @@ namespace Certitude
         public static string State(int value)
         {
             // Translate native request dispositions into labels used across the interface.
-            switch (value)
+            return value switch
             {
-                case 8: return "Processing";
-                case 9: return "Pending";
-                case 12: return "Foreign certificate";
-                case 15: return "CA certificate";
-                case 16: return "CA chain";
-                case 17: return "Recovery agent";
-                case 20: return "Issued";
-                case 21: return "Revoked";
-                case 30: return "Failed";
-                case 31: return "Denied";
-                default: return value.ToString(CultureInfo.InvariantCulture);
-            }
+                8 => "Processing", 9 => "Pending", 12 => "Foreign certificate", 15 => "CA certificate",
+                16 => "CA chain", 17 => "Recovery agent", 20 => "Issued", 21 => "Revoked", 30 => "Failed",
+                31 => "Denied", _ => value.ToString(CultureInfo.InvariantCulture)
+            };
         }
     }
 
@@ -330,29 +322,19 @@ namespace Certitude
                 "Expired" : CertificateRow.State(row.Disposition);
 
             // Select a comparison that respects the displayed field and its value type.
-            Comparison<CertificateRow> compare;
-            switch (field)
+            Comparison<CertificateRow> compare = field switch
             {
-                case nameof(CertificateRow.Configuration):
-                    compare = (left, right) => text.Compare(left.Configuration, right.Configuration); break;
-                case nameof(CertificateRow.RequestId):
-                    compare = (left, right) => left.RequestId.CompareTo(right.RequestId); break;
-                case nameof(CertificateRow.CommonName):
-                    compare = (left, right) => text.Compare(left.CommonName, right.CommonName); break;
-                case nameof(CertificateRow.Requester):
-                    compare = (left, right) => text.Compare(left.Requester, right.Requester); break;
-                case nameof(CertificateRow.Template):
-                    compare = (left, right) => text.Compare(left.TemplateDisplayName, right.TemplateDisplayName); break;
-                case nameof(CertificateRow.SerialNumber):
-                    compare = (left, right) => text.Compare(left.SerialNumber, right.SerialNumber); break;
-                case nameof(CertificateRow.Status):
-                    compare = (left, right) => text.Compare(Status(left), Status(right)); break;
-                case nameof(CertificateRow.NotBefore):
-                    compare = (left, right) => Nullable.Compare(left.NotBefore, right.NotBefore); break;
-                case nameof(CertificateRow.NotAfter):
-                    compare = (left, right) => Nullable.Compare(left.NotAfter, right.NotAfter); break;
-                default: throw new ArgumentException("Unknown sort column.");
-            }
+                nameof(CertificateRow.Configuration) => (left, right) => text.Compare(left.Configuration, right.Configuration),
+                nameof(CertificateRow.RequestId) => (left, right) => left.RequestId.CompareTo(right.RequestId),
+                nameof(CertificateRow.CommonName) => (left, right) => text.Compare(left.CommonName, right.CommonName),
+                nameof(CertificateRow.Requester) => (left, right) => text.Compare(left.Requester, right.Requester),
+                nameof(CertificateRow.Template) => (left, right) => text.Compare(left.TemplateDisplayName, right.TemplateDisplayName),
+                nameof(CertificateRow.SerialNumber) => (left, right) => text.Compare(left.SerialNumber, right.SerialNumber),
+                nameof(CertificateRow.Status) => (left, right) => text.Compare(Status(left), Status(right)),
+                nameof(CertificateRow.NotBefore) => (left, right) => Nullable.Compare(left.NotBefore, right.NotBefore),
+                nameof(CertificateRow.NotAfter) => (left, right) => Nullable.Compare(left.NotAfter, right.NotAfter),
+                _ => throw new ArgumentException("Unknown sort column.")
+            };
             // Sort a snapshot with a stable tie-breaker and honor cancellation around the work.
             var sorted = rows.ToArray();
             token.ThrowIfCancellationRequested();
@@ -673,7 +655,7 @@ namespace Certitude
         public static string Csv(string value)
         {
             // Escape CSV cells and keep spreadsheet programs from evaluating formulas.
-            value = value ?? "";
+            value ??= "";
             if (value.Length > 0 && "=+-@\t\r\n".IndexOf(value[0]) >= 0) value = "'" + value;
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }

@@ -346,11 +346,20 @@ Licensed under GPLv3. See LICENSE.md.
           <ControlTemplate TargetType="MenuItem">
             <Border x:Name="Chrome" Background="Transparent" Padding="{TemplateBinding Padding}" CornerRadius="3">
               <Grid>
-                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" />
-                <TextBlock Grid.Column="1" Text="{TemplateBinding InputGestureText}" Margin="18,0,0,0"
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid x:Name="CheckSpace" Width="18" Visibility="Collapsed">
+                  <TextBlock x:Name="CheckMark" Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
+                             FontSize="12" VerticalAlignment="Center" Visibility="Collapsed" />
+                </Grid>
+                <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" />
+                <TextBlock Grid.Column="2" Text="{TemplateBinding InputGestureText}" Margin="18,0,0,0"
                            Foreground="{DynamicResource Muted}" VerticalAlignment="Center" />
-                <Popup x:Name="PART_Popup" Placement="Bottom" Focusable="False" AllowsTransparency="True"
+                <TextBlock x:Name="SubmenuArrow" Grid.Column="3" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets"
+                           Margin="12,0,0,0" VerticalAlignment="Center" Visibility="Collapsed" />
+                <Popup x:Name="PART_Popup" Placement="Right" Focusable="False" AllowsTransparency="True"
                        IsOpen="{TemplateBinding IsSubmenuOpen}">
                   <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
                           BorderThickness="1" Padding="4">
@@ -360,6 +369,15 @@ Licensed under GPLv3. See LICENSE.md.
               </Grid>
             </Border>
             <ControlTemplate.Triggers>
+              <Trigger Property="IsCheckable" Value="True">
+                <Setter TargetName="CheckSpace" Property="Visibility" Value="Visible" />
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="CheckMark" Property="Visibility" Value="Visible" />
+              </Trigger>
+              <Trigger Property="HasItems" Value="True">
+                <Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible" />
+              </Trigger>
               <Trigger Property="IsHighlighted" Value="True">
                 <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Hover}" />
               </Trigger>

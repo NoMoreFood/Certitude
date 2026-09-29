@@ -111,7 +111,7 @@ namespace Certitude
                     }
                 }
                 // Accumulate validity durations only for issued or revoked certificates with usable dates.
-                if ((row.Disposition == 20 || row.Disposition == 21) && row.NotAfter >= row.NotBefore &&
+                if (row.Disposition is 20 or 21 && row.NotAfter >= row.NotBefore &&
                     row.NotBefore.HasValue && row.NotAfter.HasValue)
                 {
                     result.DatedCertificates++;
@@ -144,7 +144,7 @@ namespace Certitude
                     Add(months, submitted.ToString("yyyy-MM", CultureInfo.InvariantCulture), row, now);
 
                     // Measure resolution time only for completed requests with consistent timestamps.
-                    if (row.Disposition != 8 && row.Disposition != 9 && record.Resolved >= submitted)
+                    if (row.Disposition is not (8 or 9) && record.Resolved >= submitted)
                     {
                         var seconds = (record.Resolved.Value - submitted).TotalSeconds;
                         result.TimedResolutions++;
@@ -200,17 +200,12 @@ namespace Certitude
         {
             // Decode the request format bits independently of other request flags.
             if (!type.HasValue) return "(Not Recorded)";
-            switch (type.Value & 0xff00)
+            return (type.Value & 0xff00) switch
             {
-                case 0: return "Unspecified Format";
-                case 0x100: return "PKCS #10";
-                case 0x200: return "Keygen (SPKAC)";
-                case 0x300: return "PKCS #7";
-                case 0x400: return "CMC";
-                case 0x500: return "Challenge Response";
-                case 0x600: return "Signed Certificate Timestamp List";
-                default: return $"Other (0x{type.Value:X8})";
-            }
+                0 => "Unspecified Format", 0x100 => "PKCS #10", 0x200 => "Keygen (SPKAC)", 0x300 => "PKCS #7",
+                0x400 => "CMC", 0x500 => "Challenge Response", 0x600 => "Signed Certificate Timestamp List",
+                _ => $"Other (0x{type.Value:X8})"
+            };
         }
 
         private static string ReasonName(int? reason)
@@ -317,7 +312,7 @@ namespace Certitude
         {
             // Capture the selected CA and server identities before collecting independent metrics.
             token.ThrowIfCancellationRequested();
-            names = names ?? OidNames.Load(config);
+            names ??= OidNames.Load(config);
             token.ThrowIfCancellationRequested();
             var result = new CaServerStatistics();
             var host = config.Substring(0, config.IndexOf('\\'));
@@ -602,14 +597,11 @@ namespace Certitude
         internal static string CaTypeName(int type)
         {
             // Translate the CA installation type into a readable server classification.
-            switch (type)
+            return type switch
             {
-                case 0: return "Enterprise Root";
-                case 1: return "Enterprise Subordinate";
-                case 3: return "Standalone Root";
-                case 4: return "Standalone Subordinate";
-                default: return "Unknown (" + type + ")";
-            }
+                0 => "Enterprise Root", 1 => "Enterprise Subordinate", 3 => "Standalone Root",
+                4 => "Standalone Subordinate", _ => "Unknown (" + type + ")"
+            };
         }
 
         private static string Wql(string value) => value.Replace("\\", "\\\\").Replace("'", "\\'");

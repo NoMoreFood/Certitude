@@ -57,7 +57,7 @@ namespace Certitude
             OidNames names = null)
         {
             // Validate retrieval limits and choose OID resolution appropriate to the network mode.
-            if (timeoutSeconds < 1 || timeoutSeconds > 120)
+            if (timeoutSeconds is < 1 or > 120)
                 throw new ArgumentException("Set the retrieval timeout to 1–120 seconds.");
             token.ThrowIfCancellationRequested();
             names = offline ? names ?? OidNames.Windows : names?.Refresh() ?? OidNames.Local;
@@ -80,7 +80,7 @@ namespace Certitude
                         token.ThrowIfCancellationRequested();
                         var bytes = Convert.FromBase64String(CaAdministration.ReadBase64(path));
                         var kind = X509Certificate2.GetCertContentType(bytes);
-                        if (kind != X509ContentType.Cert && kind != X509ContentType.Pkcs7)
+                        if (kind is not (X509ContentType.Cert or X509ContentType.Pkcs7))
                             throw new ArgumentException("Issuer files must contain public certificates or a PKCS #7 chain.");
                         extra.Import(bytes);
                     }
@@ -305,7 +305,7 @@ namespace Certitude
             IEnumerable<X509Certificate2> issuers, OidNames names = null)
         {
             // Decode the CRL context and identify its issuer, extensions, and base or delta type.
-            names = names ?? OidNames.Windows;
+            names ??= OidNames.Windows;
             using (var crl = CertCreateCRLContext(1, bytes, bytes.Length))
             {
                 if (crl.IsInvalid) throw NativeError();
@@ -384,7 +384,7 @@ namespace Certitude
                 IntPtr.Zero, IntPtr.Zero, IntPtr.Zero))
             {
                 var error = Marshal.GetLastWin32Error();
-                if (error == unchecked((int)0x80092004)) return new string[0];
+                if (error == unchecked((int)0x80092004)) return Array.Empty<string>();
                 throw new Win32Exception(error);
             }
             // Retrieve URL pointers into a managed array before freeing the native buffer.

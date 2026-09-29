@@ -52,6 +52,7 @@ namespace Certitude
             VersionText.Text = "Version " + typeof(App).Assembly.GetName().Version.ToString(3);
             BuildContextMenu();
             UpdateContextMenu();
+            InitializeColumnMenu();
 
             // Keep the initial window within the current desktop work area.
             var bounds = SystemParameters.WorkArea;
@@ -62,8 +63,7 @@ namespace Certitude
 
             // Debounce filter edits and preselect the local CA when one is installed.
             filterTimer.Tick += (sender, e) => RefreshClick(sender, new RoutedEventArgs());
-            try { ConfigurationBox.Text = CertificateStore.LocalConfiguration(); }
-            catch (Exception error) { Record(CaAdministration.Error(error)); }
+            InitializeWorkspace();
             UpdateAuthorities(Array.Empty<string>());
         }
 
@@ -94,12 +94,6 @@ namespace Certitude
                     store.Configuration;
                 Title = "Certitude — " + store.Configuration;
 
-                // Reset CA-name sorting when switching back to a single authority.
-                if (!store.IsAllAuthorities && sortField == nameof(CertificateRow.Configuration))
-                {
-                    sortField = nameof(CertificateRow.RequestId);
-                    sortDirection = ListSortDirection.Descending;
-                }
                 // Discard the previous query, rows, and page cursors before the first lookup.
                 page = null;
                 query = null;
@@ -114,13 +108,17 @@ namespace Certitude
 
                 // Remember successful single-CA connections in the authority selector.
                 if (await LoadPage(ReadQuery(), null, 0, true) && !store.IsAllAuthorities)
+                {
                     UpdateAuthorities(new[] { store.Configuration });
+                    PersistWorkspace();
+                }
             }
             catch (Exception error) { ShowError(error); }
         }
 
         private QuerySpec ReadQuery()
         {
+            UpdateRelativeExpiry();
             // Capture and validate browser controls as a single query specification.
             var tag = Convert.ToString(((ListBoxItem)Views.SelectedItem).Tag);
             var spec = new QuerySpec
@@ -140,7 +138,9 @@ namespace Certitude
         {
             // Interpret an entered expiry date as a UTC day boundary.
             if (string.IsNullOrWhiteSpace(picker.Text)) return null;
-            if (!DateTime.TryParse(picker.Text, CultureInfo.CurrentCulture, DateTimeStyles.None, out var date))
+            if (!DateTime.TryParseExact(picker.Text.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var date) &&
+                !DateTime.TryParse(picker.Text, CultureInfo.CurrentCulture, DateTimeStyles.None, out date))
                 throw new ArgumentException("Enter a valid expiry date.");
             return DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
         }
@@ -232,6 +232,7 @@ namespace Certitude
                     Record($"{page.Rows.Count:N0} records loaded in {watch.Elapsed.TotalSeconds:N2}s. " +
                         (rows != null ? $"{rows.Length:N0} matching records sorted." :
                         page.HasMore ? "More records available." : "End of results."));
+                    if (reset) PersistWorkspace();
                     return true;
                 }
                 catch (OperationCanceledException) { }
@@ -283,6 +284,12 @@ namespace Certitude
                 return;
             }
             // Cancel stale lookups before scheduling a fresh query for changed filters.
+            if (ReferenceEquals(sender, ExpiresFrom) || ReferenceEquals(sender, ExpiresBefore) ||
+                ReferenceEquals(sender, Views))
+            {
+                expiryDays = null;
+                ExpiryPresets.SelectedIndex = 0;
+            }
             sortedRows = null;
             filtersDirty = true;
             queryCancellation?.Cancel();
@@ -317,13 +324,16 @@ namespace Certitude
         private void ExpiryPresetClick(object sender, RoutedEventArgs e)
         {
             // Translate an expiry preset into UTC bounds on issued certificates.
-            if (!IsLoaded || !(ExpiryPresets.SelectedItem is ComboBoxItem item) ||
+            if (!IsLoaded || restoringView || ExpiryPresets.SelectedItem is not ComboBoxItem item ||
                 !int.TryParse(Convert.ToString(item.Tag), out var days)) return;
-            Views.SelectedIndex = 0;
-            var today = DateTime.UtcNow.Date;
-            ExpiresFrom.Text = days > 0 ? today.ToString("yyyy-MM-dd") : "";
-            ExpiresBefore.Text = days >= 0 ? today.AddDays(days).ToString("yyyy-MM-dd") : "";
-            ExpiryPresets.SelectedIndex = 0;
+            restoringView = true;
+            try
+            {
+                Views.SelectedIndex = 0;
+                expiryDays = days >= 0 ? days : (int?)null;
+                ExpiresFrom.Text = ExpiresBefore.Text = "";
+            }
+            finally { restoringView = false; }
             RefreshClick(sender, e);
         }
 
@@ -373,7 +383,11 @@ namespace Certitude
             ExportButton.IsEnabled = !working && !filtersDirty && query != null;
             StatisticsButton.IsEnabled = AdministrationButton.IsEnabled = ToolsButton.IsEnabled =
                 !working && store != null && !store.IsAllAuthorities;
-            AuthorityColumn.Visibility = store?.IsAllAuthorities == true ? Visibility.Visible : Visibility.Collapsed;
+            if (autoAuthorityColumn)
+                AuthorityColumn.Visibility = store?.IsAllAuthorities == true ? Visibility.Visible : Visibility.Collapsed;
+            if (Certificates.Columns.All(column => column.Visibility != Visibility.Visible))
+                Certificates.Columns[0].Visibility = Visibility.Visible;
+            UpdateSavedViewControls();
             PreviousButton.IsEnabled = !working && !filtersDirty && pageIndex > 0;
             NextButton.IsEnabled = !working && !filtersDirty && page != null && page.HasMore;
             CancelButton.IsEnabled = working || filterTimer.IsEnabled;
@@ -454,7 +468,13 @@ namespace Certitude
         private void BuildContextMenu()
         {
             // Group selected-certificate details, export, validation, and native viewer actions.
-            var menu = Dialogs.RowMenu(Certificates);
+            var menu = new ContextMenu();
+            Certificates.ContextMenu = menu;
+            Certificates.PreviewMouseRightButtonDown += (sender, e) =>
+            {
+                var source = e.OriginalSource as DependencyObject;
+                if (!IsColumnHeader(source)) Dialogs.SelectContextRow(Certificates, source);
+            };
             Dialogs.MenuItem(menu, "_Open Details", Glyphs.Document, "Open",
                 () => OpenClick(this, new RoutedEventArgs()), "Enter");
             Dialogs.MenuItem(menu, "_Export Certificate…", Glyphs.Save, "Export",
@@ -495,6 +515,15 @@ namespace Certitude
                 "Select page", Certificates.SelectAll, "Ctrl+A");
             Dialogs.MenuItem(menu, "Re_fresh", Glyphs.Refresh, "Refresh",
                 () => RefreshClick(this, new RoutedEventArgs()), "F5");
+            menu.Items.Add(new Separator());
+            var columns = new MenuItem { Header = "_Columns", Tag = "Columns" };
+            Glyphs.SetIcon(columns, Glyphs.List);
+            FillColumnMenu(columns.Items);
+            columns.SubmenuOpened += (sender, e) =>
+            {
+                if (ReferenceEquals(e.OriginalSource, columns)) FillColumnMenu(columns.Items);
+            };
+            menu.Items.Add(columns);
             menu.Opened += (sender, e) => UpdateContextMenu();
         }
 
@@ -535,27 +564,21 @@ namespace Certitude
                     case "Select page": item.IsEnabled = ready && Certificates.Items.Count > 0; break;
                     case "Refresh":
                         item.IsEnabled = !busy && queryLoads == 0 && store != null && workspace.Count == 0; break;
+                    case "Columns": item.IsEnabled = !busy && workspace.Count == 0; break;
                 }
             }
             // Determine which operations can apply to the selected certificate or request view.
             bool Applicable(FrameworkElement item)
             {
                 if (view.Length == 0) return true;
-                switch ((string)item.Tag)
+                return (string)item.Tag switch
                 {
-                    case "Windows":
-                    case "Export":
-                    case "Validate":
-                    case "Copy serials": return view == "20" || view == "21";
-                    case "Issue": return view == "9" || view == "31";
-                    case "Deny":
-                    case "Set attributes":
-                    case "Extension": return view == "9";
-                    case "Archived key":
-                    case "Revoke": return view == "20";
-                    case "Release hold": return view == "21";
-                    default: return true;
-                }
+                    "Windows" or "Export" or "Validate" or "Copy serials" => view is "20" or "21",
+                    "Issue" => view is "9" or "31",
+                    "Deny" or "Set attributes" or "Extension" => view == "9",
+                    "Archived key" or "Revoke" => view == "20",
+                    "Release hold" => view == "21", _ => true
+                };
             }
             // Hide irrelevant actions in both menus and remove empty context-menu separators.
             Dialogs.FilterMenu(Certificates.ContextMenu, Applicable);
@@ -571,7 +594,7 @@ namespace Certitude
         {
             // Require one current row before retrieving its certificate from the owning CA.
             if (busy || queryLoads > 0 || filtersDirty || store == null ||
-                Certificates.SelectedItems.Count != 1 || !(Certificates.SelectedItem is CertificateRow row)) return;
+                Certificates.SelectedItems.Count != 1 || Certificates.SelectedItem is not CertificateRow row) return;
             await Run("Loading certificate…", async token =>
             {
                 // Load complete certificate data before opening validation, viewing, or export.
@@ -661,7 +684,7 @@ namespace Certitude
         private async void OpenClick(object sender, RoutedEventArgs e)
         {
             // Load the selected request details through its originating CA connection.
-            if (busy || queryLoads > 0 || filtersDirty || !(Certificates.SelectedItem is CertificateRow row)) return;
+            if (busy || queryLoads > 0 || filtersDirty || Certificates.SelectedItem is not CertificateRow row) return;
             await Run("Loading request details…", async token =>
             {
                 var source = store.ForRow(row);
@@ -683,7 +706,7 @@ namespace Certitude
         {
             // Ignore extension actions while results are stale or another operation is active.
             if (busy || queryLoads > 0 || filtersDirty || store == null ||
-                !(Certificates.SelectedItem is CertificateRow row)) return;
+                Certificates.SelectedItem is not CertificateRow row) return;
             try
             {
                 // Require one pending request and collect its replacement extension data.
@@ -721,7 +744,7 @@ namespace Certitude
         {
             // Resolve the selected request CA and choose a recovery-blob output file.
             if (busy || queryLoads > 0 || filtersDirty || store == null ||
-                !(Certificates.SelectedItem is CertificateRow row)) return;
+                Certificates.SelectedItem is not CertificateRow row) return;
             var configuration = store.ForRow(row).Configuration;
             var save = new FilePicker(true) { FileName = row.RequestId + "-archived-key.p7b", Filter = "Recovery Blob|*.p7b" };
             if (await save.ShowAsync() != true) return;
@@ -826,7 +849,7 @@ namespace Certitude
             // Defer window closure until workspace and CA operations can stop safely.
             filterTimer.Stop();
             if (workspace.Any(page => !page.CanClose())) { e.Cancel = true; return; }
-            if (!busy && queryLoads == 0) return;
+            if (!busy && queryLoads == 0) { PersistWorkspace(); return; }
             queryCancellation?.Cancel();
             cancellation?.Cancel();
             e.Cancel = true;
@@ -886,7 +909,7 @@ namespace Certitude
         private void MoreActionClick(object sender, SelectionChangedEventArgs e)
         {
             // Reset the action selector and dispatch only visible, enabled choices.
-            if (!IsLoaded || !(MoreActions.SelectedItem is ComboBoxItem item)) return;
+            if (!IsLoaded || MoreActions.SelectedItem is not ComboBoxItem item) return;
             var action = Convert.ToString(item.Tag);
             if (string.IsNullOrEmpty(action)) return;
             var enabled = item.IsEnabled && item.Visibility == Visibility.Visible;

@@ -36,7 +36,7 @@ namespace Certitude
                 throw new ArgumentException("Enter an X.500 subject (for example CN=server.example.com), " +
                     "without quotes or percent signs.");
             new X500DistinguishedName(Subject);
-            if (!new[] { "RSA 2048", "RSA 3072", "RSA 4096", "ECDSA P-256", "ECDSA P-384" }.Contains(Algorithm))
+            if (Algorithm is not ("RSA 2048" or "RSA 3072" or "RSA 4096" or "ECDSA P-256" or "ECDSA P-384"))
                 throw new ArgumentException("Choose a supported RSA or ECDSA key.");
             if (Template.Length > 0 && !Regex.IsMatch(Template, @"^[A-Za-z0-9_.-]+$"))
                 throw new ArgumentException("Enter the template's internal name or OID, without spaces.");

@@ -79,7 +79,7 @@ namespace Certitude
         public static InventoryCertificate Describe(X509Certificate2 certificate, OidNames names = null)
         {
             // Capture certificate metadata independently of the native certificate lifetime.
-            names = names ?? OidNames.Windows;
+            names ??= OidNames.Windows;
             var item = new InventoryCertificate
             {
                 Encoded = certificate.RawData, Subject = certificate.Subject, Issuer = certificate.Issuer,
@@ -123,8 +123,8 @@ namespace Certitude
                 catch (CryptographicException) { notes.Add("Cannot decode extension " + extension.Oid.Value); }
             }
             // Flag basic algorithm concerns without treating them as a trust validation result.
-            if (new[] { "1.2.840.113549.1.1.4", "1.2.840.113549.1.1.5", "1.2.840.10040.4.3",
-                "1.2.840.10045.4.1" }.Contains(certificate.SignatureAlgorithm.Value))
+            if (certificate.SignatureAlgorithm.Value is "1.2.840.113549.1.1.4" or "1.2.840.113549.1.1.5" or
+                "1.2.840.10040.4.3" or "1.2.840.10045.4.1")
                 notes.Add("Legacy MD5/SHA-1 signature");
             if (certificate.PublicKey.Oid.Value == "1.2.840.113549.1.1.1" && item.KeyBits > 0 && item.KeyBits < 2048)
                 notes.Add("RSA key below 2048 bits");
@@ -448,7 +448,7 @@ namespace Certitude
             names = names?.Refresh() ?? OidNames.Local;
             host = NormalizeHost(host);
             serverName = NormalizeHost(string.IsNullOrWhiteSpace(serverName) ? host : serverName);
-            if (port < 1 || port > 65535 || seconds < 1 || seconds > 120)
+            if (port is < 1 or > 65535 || seconds is < 1 or > 120)
                 throw new ArgumentException("Use port 1–65535 and timeout 1–120 seconds.");
             var expected = Regex.Replace(expectedThumbprint ?? "", @"[\s:]", "").ToUpperInvariant();
             if (expected.Length > 0 && !Regex.IsMatch(expected, @"^(?:[0-9A-F]{40}|[0-9A-F]{64})$"))
@@ -514,9 +514,8 @@ namespace Certitude
                     }
                     // .NET Framework EndConnect can throw when cancellation closes its socket concurrently.
                     catch (Exception error) when (deadline.IsCancellationRequested ||
-                        error is SocketException || error is IOException ||
-                        error is AuthenticationException || error is InvalidOperationException ||
-                        error is CryptographicException)
+                        error is SocketException or IOException or AuthenticationException or
+                            InvalidOperationException or CryptographicException)
                     {
                         // Distinguish user cancellation from a timeout or rejected TLS connection.
                         if (token.IsCancellationRequested) throw new OperationCanceledException(token);

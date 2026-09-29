@@ -51,6 +51,8 @@ Licensed under GPLv3. See LICENSE.md.
     <Page Include="MainWindow.xaml" />
     <Compile Include="App.xaml.cs" />
     <Compile Include="MainWindow.xaml.cs" />
+    <Compile Include="MainWindow.Workspaces.cs" />
+    <Compile Include="BrowserWorkspace.cs" />
     <Compile Include="CertificateStore.cs" />
     <Compile Include="OidDirectory.cs" />
     <Compile Include="OidNames.cs" />

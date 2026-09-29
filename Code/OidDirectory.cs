@@ -23,10 +23,12 @@ namespace Certitude
         public string[] PolicyStatements { get; set; } = Array.Empty<string>();
         public string[] Templates { get; set; } = Array.Empty<string>();
         public bool Protected { get; set; }
-        public string Kind => Flags == 1 ? "Certificate Template" : Flags == 2 ? "Issuance Policy" :
-            Flags == 3 ? "Application Policy" : "Other / Forest OID";
+        public string Kind => Flags switch
+        {
+            1 => "Certificate Template", 2 => "Issuance Policy", 3 => "Application Policy", _ => "Other / Forest OID"
+        };
         public int TemplateCount => Templates.Length;
-        public string RemovalBlock => Protected || (Flags != 2 && Flags != 3) ? "This OID Is Read Only." :
+        public string RemovalBlock => Protected || Flags is not (2 or 3) ? "This OID Is Read Only." :
             !string.IsNullOrEmpty(GroupLink) ? "This Policy Is Linked To An AD Group." :
             Templates.Length > 0 ? "This OID Is Referenced By Certificate Templates." : "";
         public bool CanRemove => RemovalBlock.Length == 0;
@@ -137,7 +139,7 @@ namespace Certitude
             value = (value ?? "").Trim();
             var arcs = value.Split('.');
             if (arcs.Length < 2 || arcs.Any(arc => arc.Length == 0 || arc.Any(c => c < '0' || c > '9') ||
-                (arc.Length > 1 && arc[0] == '0')) || (arcs[0] != "0" && arcs[0] != "1" && arcs[0] != "2") ||
+                (arc.Length > 1 && arc[0] == '0')) || arcs[0] is not ("0" or "1" or "2") ||
                 (arcs[0] != "2" && (arcs[1].Length > 2 || int.Parse(arcs[1], CultureInfo.InvariantCulture) > 39)))
                 throw new ArgumentException("Enter a numeric OID such as 1.3.6.1.4.1.55555.1, without leading zeros. " +
                     "The first number must be 0, 1 or 2; the second must be at most 39 when the first is 0 or 1.");
@@ -149,7 +151,7 @@ namespace Certitude
             // Require a valid OID, display name, and supported custom policy type.
             value = ValidateValue(value);
             name = (name ?? "").Trim();
-            if (name.Length == 0 || name.Length > 256 || name.Any(char.IsControl) || (flags != 2 && flags != 3))
+            if (name.Length is 0 or > 256 || name.Any(char.IsControl) || flags is not (2 or 3))
                 throw new ArgumentException("Enter a display name of 1–256 characters and select an application or " +
                     "issuance policy.");
 

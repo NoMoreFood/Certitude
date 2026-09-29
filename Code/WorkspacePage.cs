@@ -125,7 +125,7 @@ namespace Certitude
         private bool initialized;
         public string Filter { get; set; } = "All Files|*.*";
         public string FileName { get; set; } = "";
-        public string[] FileNames { get; private set; } = new string[0];
+        public string[] FileNames { get; private set; } = Array.Empty<string>();
         public int FilterIndex { get; set; } = 1;
         public bool Multiselect { get; set; }
 
@@ -190,8 +190,8 @@ namespace Certitude
             files.MouseDoubleClick += async (sender, e) =>
             {
                 // Open folders on double-click and accept files only when a real row was clicked.
-                if (!(files.SelectedItem is FileChoice item) ||
-                    !(ItemsControl.ContainerFromElement(files, e.OriginalSource as DependencyObject) is DataGridRow)) return;
+                if (files.SelectedItem is not FileChoice item ||
+                    ItemsControl.ContainerFromElement(files, e.OriginalSource as DependencyObject) is not DataGridRow) return;
                 if (item.Directory) await ReadFolder(item.Path);
                 else await Accept();
             };
