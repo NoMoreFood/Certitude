@@ -119,11 +119,10 @@ try
     $binaryVersion = [version] (Get-Item -LiteralPath $executable).VersionInfo.FileVersion
     if ($binaryVersion -ne $releaseVersion) { throw 'The built executable does not match the release version.' }
 
-    # Stage the portable executable, configuration, and project documentation.
+    # Stage the portable executable and configuration.
     $portableDirectory = Join-Path $StageDirectory 'Portable'
     New-Item -ItemType Directory -Path $portableDirectory | Out-Null
-    Copy-Item -LiteralPath $executable, "$executable.config", "$repositoryDirectory\README.md", `
-        "$repositoryDirectory\LICENSE.md" -Destination $portableDirectory
+    Copy-Item -LiteralPath $executable, "$executable.config" -Destination $portableDirectory
 
     # Sign the staged executable and verify its Authenticode signature and timestamp.
     $signedExecutable = Join-Path $portableDirectory 'Certitude.exe'

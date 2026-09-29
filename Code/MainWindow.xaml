@@ -33,8 +33,11 @@ Licensed under GPLv3. See LICENSE.md.
           <Image Source="Assets/Certitude.png" Width="28" Height="28" Margin="0,0,7,0"
                  RenderOptions.BitmapScalingMode="HighQuality" />
           <StackPanel VerticalAlignment="Center">
-            <TextBlock Text="Certitude" FontSize="19" FontWeight="SemiBold"
-                       Foreground="{DynamicResource HeaderInk}" />
+            <TextBlock FontSize="19" FontWeight="SemiBold" Foreground="{DynamicResource HeaderInk}">
+              <Hyperlink NavigateUri="https://github.com/NoMoreFood/Certitude" RequestNavigate="ProjectNavigate"
+                         Foreground="{DynamicResource HeaderInk}" TextDecorations="None"
+                         ToolTip="Open Certitude on GitHub">Certitude</Hyperlink>
+            </TextBlock>
             <TextBlock x:Name="VersionText" FontSize="10" Margin="0,1,0,0"
                        Foreground="{DynamicResource HeaderMuted}" />
           </StackPanel>

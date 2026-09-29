@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Navigation;
 using System.Windows.Threading;
 
 namespace Certitude
@@ -72,6 +73,16 @@ namespace Certitude
             // Discover available authorities before connecting to the preselected local CA.
             await DiscoverAuthorities();
             if (ConfigurationBox.Text.Length > 0) await Connect();
+        }
+
+        private void ProjectNavigate(object sender, RequestNavigateEventArgs args)
+        {
+            args.Handled = true;
+            try
+            {
+                using var process = Process.Start(new ProcessStartInfo(args.Uri.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch (Exception error) { ShowError(error); }
         }
 
         private async void ConnectClick(object sender, RoutedEventArgs e) => await Connect();
