@@ -146,7 +146,7 @@ namespace Certitude
         public void Validate()
         {
             // Reject unsupported filters and invalid bounds before opening a CA query.
-            if (PageSize < 1 || PageSize > 10000) throw new ArgumentException("Page size must be 1–10,000.");
+            if (PageSize is < 1 or > 25000) throw new ArgumentException("Page size must be 1–25,000.");
             if (!CertificateStore.SearchFields.Contains(Field)) throw new ArgumentException("Unknown search field.");
             if (!Enum.IsDefined(typeof(SearchMatch), Match)) throw new ArgumentException("Unknown search match mode.");
             if (Field == "RequestID" && Match == SearchMatch.Exact && Value.Length > 0 &&

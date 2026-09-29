@@ -392,6 +392,7 @@ namespace Certitude
             NextButton.IsEnabled = !working && !filtersDirty && page != null && page.HasMore;
             CancelButton.IsEnabled = working || filterTimer.IsEnabled;
             Progress.Visibility = working ? Visibility.Visible : Visibility.Collapsed;
+            ResultsLoading.Visibility = queryLoads > 0 ? Visibility.Visible : Visibility.Collapsed;
 
             // Show current paging and selection counts or the pending-load state.
             PageText.Text = page == null ?

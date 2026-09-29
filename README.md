@@ -72,7 +72,7 @@ Right-click preserves an existing bulk selection or selects the clicked row; emp
 ### Search, sorting and export
 
 - Search is case-insensitive, defaults to **All Fields / Contains**, and spans all matching pages. **Exact** on one field and expiry bounds are fastest for large CAs; contains/prefix searches may scan every candidate.
-- Changes apply after 400 ms, reset to page one and cancel superseded queries. Refresh applies immediately. Pages contain 500-10,000 records (default 1,000).
+- Changes apply after 400 ms, reset to page one and cancel superseded queries. Refresh applies immediately. Pages contain 500-25,000 records (default 1,000); a centered indicator appears while records load.
 - Expiry dates accept `yyyy-MM-dd`, with UTC inclusive-start/exclusive-end bounds. Presets select expired or upcoming 7/30/60/90-day issued certificates.
 - Column sorting spans all matching records, using numeric IDs, chronological dates and case-insensitive text. Ties use descending request ID, then CA name. Blanks sort first ascending, last descending.
 - Newest-first retains one page; other sorts cache all matching metadata. Certificate bodies load on demand. **Export CSV** streams all matches with bounded memory and preserves existing output on failure/cancellation. CSV cells are quoted and formula-like text is protected.

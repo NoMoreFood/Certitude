@@ -77,7 +77,7 @@ namespace Certitude
             Filter.Validate();
             if (Filter.Disposition is not (null or 20 or 9 or 21 or 30 or 31))
                 throw new InvalidDataException("The saved view has an unsupported record category.");
-            if (Filter.PageSize is not (500 or 1000 or 5000 or 10000))
+            if (Filter.PageSize is not (500 or 1000 or 5000 or 10000 or 15000 or 20000 or 25000))
                 throw new InvalidDataException("The saved view has an unsupported page size.");
             if (ExpiryDays.HasValue && (ExpiryDays is not (0 or 7 or 30 or 60 or 90) ||
                 Filter.Disposition != 20))
