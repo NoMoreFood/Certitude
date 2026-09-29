@@ -1,0 +1,12 @@
+<!--
+Copyright (c) Bryan Berns.
+Licensed under GPLv3. See LICENSE.md.
+-->
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path d="M12 5H39L50 16V53H12Z" fill="#EAF1F7" stroke="#19384F" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M39 5V16H50" fill="none" stroke="#19384F" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M21 23H40M21 31H34M21 39H29" fill="none" stroke="#19384F" stroke-width="3" stroke-linecap="round"/>
+  <path d="M43 29L59 35V44C59 52 52 58 43 61C34 58 27 52 27 44V35Z" fill="#168A91" stroke="#19384F" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M35 44L41 50L52 39" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

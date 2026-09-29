@@ -1,0 +1,241 @@
+<!--
+Copyright (c) Bryan Berns.
+Licensed under GPLv3. See LICENSE.md.
+-->
+
+<Window x:Class="Certitude.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:Certitude"
+        Title="Certitude" Icon="Assets/Certitude.ico"
+        Width="1280" Height="820" MinWidth="900" MinHeight="620" WindowStartupLocation="CenterScreen"
+        Style="{StaticResource {x:Type Window}}"
+        Loaded="WindowLoaded" Closing="WindowClosing" PreviewKeyDown="WindowKeyDown">
+  <DockPanel>
+    <Border DockPanel.Dock="Top" Background="{DynamicResource Header}" Padding="10,7">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,18,0">
+          <Image Source="Assets/Certitude.png" Width="28" Height="28" Margin="0,0,7,0"
+                 RenderOptions.BitmapScalingMode="HighQuality" />
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="Certitude" FontSize="19" FontWeight="SemiBold"
+                       Foreground="{DynamicResource HeaderInk}" />
+            <TextBlock x:Name="VersionText" FontSize="10" Margin="0,1,0,0"
+                       Foreground="{DynamicResource HeaderMuted}" />
+          </StackPanel>
+        </StackPanel>
+        <Button x:Name="ThemeButton" DockPanel.Dock="Right" Content="{DynamicResource ThemeAction}"
+                Click="ThemeClick" Margin="7,0,0,0" VerticalAlignment="Bottom" local:Glyphs.Icon="{x:Static local:Glyphs.Theme}" />
+        <StackPanel x:Name="ConnectionPanel">
+          <Label Content="Certificate Authority" Style="{StaticResource FieldLabelStyle}"
+                 local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}"
+                 Foreground="{DynamicResource HeaderMuted}" FontSize="11" Margin="0,0,0,2" />
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="_Connect" Click="ConnectClick" Margin="5,0,0,0"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Connect}" />
+            <Button x:Name="DiscoverButton" DockPanel.Dock="Right" Content="_Find CAs" Click="DiscoverClick" Margin="5,0,0,0"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
+            <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False"
+                      ToolTip="Select All CAs to search every listed authority, select one CA, or enter SERVER\CA Name." />
+          </DockPanel>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+    <Border DockPanel.Dock="Bottom" Background="{DynamicResource SurfaceAlt}" Padding="10,4">
+      <DockPanel>
+        <Button x:Name="CancelButton" DockPanel.Dock="Right" Content="_Cancel Operation" Click="CancelClick"
+                IsEnabled="False" Margin="6,0,0,0" local:Glyphs.Icon="{x:Static local:Glyphs.Cancel}" />
+        <ProgressBar x:Name="Progress" DockPanel.Dock="Right" Width="70" Height="3" Margin="8,0"
+                     IsIndeterminate="True" Visibility="Collapsed" />
+        <TextBlock x:Name="StatusText" Text="Select A Certificate Authority Or Open Certificate Manager."
+                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+      </DockPanel>
+    </Border>
+    <Grid>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="182" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+      <Border Background="{DynamicResource Sidebar}" BorderBrush="{DynamicResource Border}"
+              BorderThickness="0,0,1,0" Padding="6,10,6,6">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel>
+            <TextBlock Text="Certificates And Requests" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Muted}" Margin="4,0,0,5" />
+            <ListBox x:Name="Views" SelectedIndex="0" BorderThickness="0" Background="Transparent"
+                     SelectionChanged="FilterChanged" IsEnabled="False">
+              <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                  <Setter Property="Padding" Value="7,7" />
+                </Style>
+              </ListBox.ItemContainerStyle>
+              <ListBoxItem Content="Issued Certificates" Tag="20" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
+              <ListBoxItem Content="Pending Requests" Tag="9" local:Glyphs.Icon="{x:Static local:Glyphs.Pending}" />
+              <ListBoxItem Content="Revoked Certificates" Tag="21" local:Glyphs.Icon="{x:Static local:Glyphs.Block}" />
+              <ListBoxItem Content="Failed Requests" Tag="30" local:Glyphs.Icon="{x:Static local:Glyphs.Warning}" />
+              <ListBoxItem Content="Denied Requests" Tag="31" local:Glyphs.Icon="{x:Static local:Glyphs.Cancel}" />
+              <ListBoxItem Content="All Records" Tag="" local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
+            </ListBox>
+            <TextBlock Text="Tools" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Muted}" Margin="4,12,0,5" />
+            <Button x:Name="CertificateManagerButton" Content="Certificate _Manager" Click="CertificateToolsClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
+            <Button x:Name="OidManagerButton" Content="_OID Manager" Click="OidManagerClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
+            <Button x:Name="PublishedButton" Content="Forest _Published" Click="PublishedClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
+            <Button Content="Certificate / CRL Chec_k" Click="ValidationClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
+            <Button x:Name="AdministrationButton" Content="_Administration" Click="AdministrationClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />
+            <Button x:Name="ToolsButton" Content="Advanced _Tools" Click="ToolsClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.More}" />
+            <Button x:Name="StatisticsButton" Content="_Statistics" Click="StatisticsClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Statistics}" />
+            <TextBlock Text="Windows Authentication" FontSize="10"
+                       Foreground="{DynamicResource Muted}" Margin="4,8,0,0" />
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+      <Grid Grid.Column="1" Margin="9,8">
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <DockPanel x:Name="WorkspaceHeader" Visibility="Collapsed" Margin="0,0,0,5">
+          <Button x:Name="BackButton" Content="_Back" Click="BackClick" Margin="0,0,8,0" DockPanel.Dock="Left"
+                  local:Glyphs.Icon="{x:Static local:Glyphs.Back}" />
+          <TextBlock x:Name="WorkspaceTitle" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+        </DockPanel>
+        <ContentControl x:Name="WorkspaceContent" Grid.Row="1" Visibility="Collapsed"
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+        <Grid x:Name="BrowserPanel" Grid.RowSpan="2">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+            <RowDefinition Height="*" /><RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <DockPanel Margin="0,0,0,6">
+            <TextBlock x:Name="ViewTitle" Text="Issued Certificates" FontSize="17" FontWeight="SemiBold" />
+            <TextBlock x:Name="TargetText" Text="No Authority Selected" Foreground="{DynamicResource Muted}"
+                       Margin="12,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+          </DockPanel>
+          <Border Grid.Row="1" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
+                  BorderThickness="1" Padding="6" Margin="0,0,0,10">
+            <StackPanel x:Name="FilterPanel" IsEnabled="False">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="152" /><ColumnDefinition Width="105" />
+                  <ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Margin="0,0,6,0" VerticalAlignment="Bottom">
+                  <Label Content="Search Field" Style="{StaticResource FieldLabelStyle}" FontSize="11" Margin="0,0,0,2"
+                         local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
+                  <ComboBox x:Name="SearchField" SelectedIndex="0" SelectionChanged="FilterChanged">
+                    <ComboBoxItem Content="All Fields" Tag="All" />
+                    <ComboBoxItem Content="Common Name" Tag="CommonName" />
+                    <ComboBoxItem Content="Requester" Tag="RequesterName" />
+                    <ComboBoxItem Content="Template Name / OID" Tag="CertificateTemplate" />
+                    <ComboBoxItem Content="Serial Number" Tag="SerialNumber" />
+                    <ComboBoxItem Content="Request ID" Tag="RequestID" />
+                    <ComboBoxItem Content="Certificate Authority" Tag="Configuration" />
+                  </ComboBox>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="0,0,6,0" VerticalAlignment="Bottom">
+                  <Label Content="Match" Style="{StaticResource FieldLabelStyle}" FontSize="11" Margin="0,0,0,2"
+                         local:Glyphs.Icon="{x:Static local:Glyphs.Filter}" />
+                  <ComboBox x:Name="MatchMode" SelectedIndex="0" SelectionChanged="FilterChanged">
+                    <ComboBoxItem Content="Contains" /><ComboBoxItem Content="Starts With" /><ComboBoxItem Content="Exact" />
+                  </ComboBox>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Margin="0,0,6,0" VerticalAlignment="Bottom">
+                  <Label Content="Search" Style="{StaticResource FieldLabelStyle}" FontSize="11" Margin="0,0,0,2"
+                         local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
+                  <TextBox x:Name="SearchBox" TextChanged="FilterChanged" ToolTip="Leave empty to show all matching records." />
+                </StackPanel>
+                <Button Grid.Column="3" Content="_Refresh" Click="RefreshClick" VerticalAlignment="Bottom" Margin="0"
+                        local:Glyphs.Icon="{x:Static local:Glyphs.Refresh}" />
+              </Grid>
+              <WrapPanel Margin="0,5,0,0">
+                <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
+                  <TextBlock Text="Expires From" VerticalAlignment="Center" Margin="0,0,6,0" />
+                  <TextBox x:Name="ExpiresFrom" Width="92" TextChanged="FilterChanged" ToolTip="UTC Date: yyyy-MM-dd" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
+                  <TextBlock Text="Before" VerticalAlignment="Center" Margin="0,0,6,0" />
+                  <TextBox x:Name="ExpiresBefore" Width="92" TextChanged="FilterChanged" ToolTip="UTC Date: yyyy-MM-dd" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
+                  <TextBlock Text="Page Size" VerticalAlignment="Center" Margin="0,0,6,0" />
+                  <ComboBox x:Name="PageSize" Width="70" SelectedIndex="1" SelectionChanged="FilterChanged">
+                    <ComboBoxItem Content="500" /><ComboBoxItem Content="1000" />
+                    <ComboBoxItem Content="5000" /><ComboBoxItem Content="10000" />
+                  </ComboBox>
+                </StackPanel>
+                <ComboBox x:Name="ExpiryPresets" Width="132" Margin="0,0,6,4"
+                          SelectedIndex="0" SelectionChanged="ExpiryPresetClick">
+                  <ComboBoxItem Content="Expiry Presets" Tag="" /><ComboBoxItem Content="All Expiry Dates" Tag="-1" />
+                  <ComboBoxItem Content="Expired" Tag="0" /><ComboBoxItem Content="Next 7 Days" Tag="7" />
+                  <ComboBoxItem Content="Next 30 Days" Tag="30" /><ComboBoxItem Content="Next 60 Days" Tag="60" />
+                  <ComboBoxItem Content="Next 90 Days" Tag="90" />
+                </ComboBox>
+                <Button x:Name="ClearFiltersButton" Content="C_lear" Click="ClearClick" Margin="0,0,0,4"
+                        local:Glyphs.Icon="{x:Static local:Glyphs.Cancel}" />
+              </WrapPanel>
+              <TextBlock x:Name="SearchHint" Text="Live Filtering · Dates In UTC" Foreground="{DynamicResource Muted}"
+                         FontSize="10" TextTrimming="CharacterEllipsis" />
+              <ScrollViewer x:Name="AuthorityNotice" Visibility="Collapsed" MaxHeight="80" Margin="0,6,0,0"
+                            VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <TextBlock x:Name="AuthorityNoticeText" TextWrapping="Wrap" />
+              </ScrollViewer>
+            </StackPanel>
+          </Border>
+          <DockPanel Grid.Row="2" Margin="0,0,0,8">
+            <Button x:Name="ExportButton" DockPanel.Dock="Right" Content="_Export CSV" Click="ExportClick"
+                    Margin="5,0,0,0" IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Save}" />
+            <StackPanel x:Name="ActionsPanel" Orientation="Horizontal" IsEnabled="False">
+              <Button Content="_Open" Click="OpenClick" local:Glyphs.Icon="{x:Static local:Glyphs.Document}" />
+              <Button Content="_Issue" Tag="Issue" Click="ActionClick" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
+              <Button Content="_Revoke" Tag="Revoke" Click="ActionClick" local:Glyphs.Icon="{x:Static local:Glyphs.Block}" />
+              <ComboBox x:Name="MoreActions" Width="184" SelectedIndex="0" SelectionChanged="MoreActionClick">
+                <ComboBoxItem Content="More Actions" Tag="" /><ComboBoxItem Content="Deny Request" Tag="Deny" />
+                <ComboBoxItem Content="Release Certificate Hold" Tag="Release hold" />
+                <ComboBoxItem Content="Set Request Attributes" Tag="Set attributes" />
+                <ComboBoxItem Content="Set Certificate Extension" Tag="Extension" />
+                <ComboBoxItem Content="Retrieve Archived Key" Tag="Archived key" />
+                <ComboBoxItem Content="Delete From Database" Tag="Delete" local:Glyphs.Icon="{x:Static local:Glyphs.Delete}" />
+              </ComboBox>
+            </StackPanel>
+          </DockPanel>
+          <Grid Grid.Row="3">
+            <DataGrid x:Name="Certificates" SelectionMode="Extended" SelectionChanged="SelectionChanged"
+                      MouseDoubleClick="GridDoubleClick" Sorting="GridSorting" CanUserReorderColumns="True">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Request ID" SortMemberPath="RequestId" Binding="{Binding RequestId}" Width="78" />
+                <DataGridTextColumn x:Name="AuthorityColumn" Header="Certificate Authority" SortMemberPath="Configuration"
+                                    Binding="{Binding Configuration}" Width="225" Visibility="Collapsed" />
+                <DataGridTextColumn Header="Common Name" SortMemberPath="CommonName" Binding="{Binding CommonName}" Width="235" />
+                <DataGridTextColumn Header="Status" SortMemberPath="Status" Binding="{Binding Status}" Width="84" />
+                <DataGridTextColumn Header="Requester" SortMemberPath="Requester" Binding="{Binding Requester}" Width="175" />
+                <DataGridTextColumn Header="Template" SortMemberPath="Template" Binding="{Binding TemplateDisplayName}" Width="135" />
+                <DataGridTextColumn Header="Expires (UTC)" SortMemberPath="NotAfter"
+                                    Binding="{Binding NotAfter, StringFormat=yyyy-MM-dd HH:mm}" Width="140" />
+                <DataGridTextColumn Header="Valid From (UTC)" SortMemberPath="NotBefore"
+                                    Binding="{Binding NotBefore, StringFormat=yyyy-MM-dd HH:mm}" Width="140" />
+                <DataGridTextColumn Header="Serial Number" SortMemberPath="SerialNumber"
+                                    Binding="{Binding SerialNumber}" Width="245" />
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="EmptyText" Text="Connect To A Certificate Authority To Browse Its Database."
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource Muted}"
+                       FontSize="13" IsHitTestVisible="False" TextWrapping="Wrap" MaxWidth="450" />
+          </Grid>
+          <DockPanel Grid.Row="4" Margin="0,5,0,0">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="PreviousButton" Content="_Previous Page" Click="PreviousClick" IsEnabled="False"
+                      local:Glyphs.Icon="{x:Static local:Glyphs.Back}" />
+              <Button x:Name="NextButton" Content="_Next Page" Click="NextClick" IsEnabled="False" Margin="0"
+                      local:Glyphs.Icon="{x:Static local:Glyphs.Forward}" />
+            </StackPanel>
+            <TextBlock x:Name="PageText" Text="No Records Loaded" VerticalAlignment="Center"
+                       ToolTip="Column sorting covers all matching records. Refresh retrieves current CA data." />
+          </DockPanel>
+        </Grid>
+      </Grid>
+    </Grid>
+  </DockPanel>
+</Window>

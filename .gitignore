@@ -1,0 +1,9 @@
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.log
+*.exe
+/Binaries/
+/Build/PackageStage/

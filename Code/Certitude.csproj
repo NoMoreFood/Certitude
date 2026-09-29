@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+Copyright (c) Bryan Berns.
+Licensed under GPLv3. See LICENSE.md.
+-->
+
+<Project ToolsVersion="Current" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <ProjectGuid>{49C1DCA8-5C98-4D50-A929-61F5D8F74428}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Certitude</RootNamespace>
+    <AssemblyName>Certitude</AssemblyName>
+    <StartupObject>Certitude.EntryPoint</StartupObject>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <LangVersion>14.0</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Certitude.ico</ApplicationIcon>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <DebugSymbols Condition="'$(Configuration)' == 'Debug'">true</DebugSymbols>
+    <DebugType>pdbonly</DebugType>
+    <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.DirectoryServices" />
+    <Reference Include="System.DirectoryServices.Protocols" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Management" />
+    <Reference Include="System.Numerics" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <Resource Include="Assets\Certitude.ico" />
+    <Resource Include="Assets\Certitude.png" />
+    <None Include="Assets\Certitude.svg" />
+    <None Include="Assets\Generate-Icon.ps1" />
+    <ApplicationDefinition Include="App.xaml" />
+    <Page Include="MainWindow.xaml" />
+    <Compile Include="App.xaml.cs" />
+    <Compile Include="MainWindow.xaml.cs" />
+    <Compile Include="CertificateStore.cs" />
+    <Compile Include="OidDirectory.cs" />
+    <Compile Include="OidNames.cs" />
+    <Compile Include="OidManagerPage.cs" />
+    <Compile Include="PublishedDirectory.cs" />
+    <Compile Include="PublishedPage.cs" />
+    <Compile Include="CaStatistics.cs" />
+    <Compile Include="StatisticsPage.cs" />
+    <Compile Include="ExportCommand.cs" />
+    <Compile Include="CaInterop.cs" />
+    <Compile Include="CaAdministration.cs" />
+    <Compile Include="AdministrationWindow.cs" />
+    <Compile Include="Dialogs.cs" />
+    <Compile Include="WorkspacePage.cs" />
+    <Compile Include="ToolWindow.cs" />
+    <Compile Include="CaMaintenance.cs" />
+    <Compile Include="CertificateValidation.cs" />
+    <Compile Include="ValidationWindow.cs" />
+    <Compile Include="CertificateUtilities.cs" />
+    <Compile Include="CertificateToolsWindow.cs" />
+    <Compile Include="Enrollment.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
