@@ -39,7 +39,7 @@ try
     if (!$versionMatch.Success) { throw 'AssemblyFileVersion must contain a four-part release version.' }
     $releaseVersion = [version] $versionMatch.Groups[1].Value
     $version = if ($releaseVersion.Revision -eq 0) { $releaseVersion.ToString(3) } else { $releaseVersion.ToString() }
-    $packageName = "Certitude-$version-x64-portable.zip"
+    $packageName = "Certitude-$version-x64.zip"
     $packagePath = Join-Path $OutputDirectory $packageName
 
     # Clear prior staging content and the same-version package before rebuilding.
