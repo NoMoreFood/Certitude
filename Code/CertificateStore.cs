@@ -220,6 +220,8 @@ namespace Certitude
             "RequestID", "CommonName", "RequesterName", "CertificateTemplate", "SerialNumber",
             "NotBefore", "NotAfter", "Request.Disposition", "Request.RevokedReason"
         };
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> scanGates =
+            new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase);
 
         public virtual string Configuration { get; }
         internal virtual bool IsAllAuthorities => false;
@@ -354,8 +356,17 @@ namespace Certitude
             query.Validate();
             token.ThrowIfCancellationRequested();
             if (query.ExactId.HasValue && before.HasValue && query.ExactId.Value >= before.Value) yield break;
+            if (query.Field == "Configuration" && query.Value.Length > 0 && !query.MatchesText(Configuration)) yield break;
             var names = Oids;
             token.ThrowIfCancellationRequested();
+
+            // Parallelize client-side scans unless the CA name alone already matches every candidate.
+            if (query.UsesClientSearch && query.Field != "Configuration" &&
+                (query.Field != "All" || !query.MatchesText(Configuration)))
+            {
+                foreach (var row in ReadScanRows(query, before, token, names)) yield return row;
+                yield break;
+            }
 
             // Expand exact template searches to their indexed name and OID representations.
             var restrictions = query.Field == "CertificateTemplate" && query.Match == SearchMatch.Exact &&
@@ -392,8 +403,73 @@ namespace Certitude
             finally { foreach (var stream in streams) stream.Dispose(); }
         }
 
+        private IEnumerable<CertificateRow> ReadScanRows(QuerySpec query, int? before,
+            CancellationToken token, OidNames names)
+        {
+            // Limit one expensive scan per CA so concurrent callers cannot multiply its four readers.
+            var gate = scanGates.GetOrAdd(Configuration, _ => new SemaphoreSlim(1, 1));
+            gate.Wait(token);
+            try
+            {
+                // Keep quick pages on one reader and record the last candidate, including rejected rows.
+                var budget = Math.Max(4096, query.PageSize + 1);
+                var scanned = 0;
+                var cursor = 0;
+                foreach (var row in ReadRowsCore(query, before, token, true, names, null, 1, budget, id =>
+                {
+                    scanned++;
+                    cursor = id;
+                })) yield return row;
+                if (scanned < budget || cursor <= 1) yield break;
+
+                // Split the remaining ID range without placing two restrictions on the sorted column.
+                const int readers = 4;
+                var width = (cursor - 1L + readers - 1) / readers;
+                using (var request = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    var buffers = Enumerable.Range(0, readers)
+                        .Select(_ => new BlockingCollection<CertificateRow>(256)).ToArray();
+                    var workers = Enumerable.Range(0, readers).Select(partition => Task.Factory.StartNew(() =>
+                    {
+                        var upper = (int)Math.Max(1, cursor - partition * width);
+                        var lower = (int)Math.Max(1, cursor - (partition + 1) * width);
+                        try
+                        {
+                            // Each worker owns its COM objects and stops before entering the next range.
+                            if (upper <= lower) return;
+                            foreach (var row in ReadRowsCore(query, upper, request.Token, true, names, null, lower))
+                                buffers[partition].Add(row, request.Token);
+                        }
+                        catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+                        catch
+                        {
+                            request.Cancel();
+                            throw;
+                        }
+                        finally { buffers[partition].CompleteAdding(); }
+                    }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+                    try
+                    {
+                        // Disjoint descending ranges can be consumed in order without waiting for all heads.
+                        foreach (var buffer in buffers)
+                            foreach (var row in buffer.GetConsumingEnumerable(request.Token)) yield return row;
+                        token.ThrowIfCancellationRequested();
+                    }
+                    finally
+                    {
+                        // Early page completion and faults must stop and join every producer before returning.
+                        request.Cancel();
+                        try { Task.WhenAll(workers).GetAwaiter().GetResult(); }
+                        finally { foreach (var buffer in buffers) buffer.Dispose(); }
+                    }
+                }
+            }
+            finally { gate.Release(); }
+        }
+
         private IEnumerable<CertificateRow> ReadRowsCore(QuerySpec query, int? before, CancellationToken token,
-            bool ordered, OidNames names, string templateRestriction)
+            bool ordered, OidNames names, string templateRestriction, int minimumId = 1,
+            int maximumRows = int.MaxValue, Action<int> scanned = null)
         {
             // Open a narrow metadata view to avoid fetching certificate blobs while browsing.
             token.ThrowIfCancellationRequested();
@@ -426,7 +502,7 @@ namespace Certitude
                 {
                     var ordinals = new Dictionary<int, int>();
                     var searchColumn = query.UsesClientSearch ? Array.IndexOf(Columns, query.Field) : -1;
-                    while (true)
+                    for (var read = 0; read < maximumRows; read++)
                     {
                         // Read one request at a time while keeping cancellation responsive.
                         token.ThrowIfCancellationRequested();
@@ -446,9 +522,18 @@ namespace Certitude
                                         NormalizeColumn(name), StringComparison.OrdinalIgnoreCase));
                                     ordinals[index] = ordinal;
                                 }
-                                // Resolve template metadata alongside the raw value for display and filtering.
+                                // Enforce partition bounds before rejecting any selected search field.
                                 if (ordinal < 0) continue;
                                 var value = columns.Value.GetValue(1);
+                                if (ordinal == 0)
+                                {
+                                    row.RequestId = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                                    if (row.RequestId < 1)
+                                        throw new InvalidOperationException("The CA returned no request ID for a row.");
+                                    if (row.RequestId < minimumId) yield break;
+                                    scanned?.Invoke(row.RequestId);
+                                }
+                                // Resolve template metadata alongside the raw value for display and filtering.
                                 if (ordinal == 3)
                                 {
                                     row.Template = Convert.ToString(value, CultureInfo.InvariantCulture);
@@ -464,7 +549,6 @@ namespace Certitude
                                 // Convert the remaining native values into the lightweight browser row.
                                 switch (ordinal)
                                 {
-                                    case 0: row.RequestId = Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
                                     case 1: row.CommonName = Convert.ToString(value, CultureInfo.InvariantCulture); break;
                                     case 2: row.Requester = Convert.ToString(value, CultureInfo.InvariantCulture); break;
                                     case 4: row.SerialNumber = Convert.ToString(value, CultureInfo.InvariantCulture); break;
@@ -478,9 +562,9 @@ namespace Certitude
                         }
                         // Enforce exact client-side bounds before exposing a complete matching record.
                         token.ThrowIfCancellationRequested();
-                        if (rejected) continue;
                         if (row.RequestId < 1)
                             throw new InvalidOperationException("The CA returned no request ID for a row.");
+                        if (rejected) continue;
                         if (query.Matches(row)) yield return row;
                     }
                 }
