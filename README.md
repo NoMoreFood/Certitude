@@ -1,8 +1,10 @@
-# Certitude
+# <img src="Code/Assets/Certitude.png" alt="Certitude icon" width="48" height="48"> Certitude
 
 A compact, x64 WPF administration application for Windows Certificate Services, targeting **.NET Framework 4.7.2**. It uses the current Windows identity and the CA's existing permissions. Run on a Windows CA with Desktop Experience and the AD CS management tools installed. There are no NuGet or third-party runtime dependencies.
 
 Licensed under the [GNU General Public License v3.0](LICENSE.md).
+
+![Certitude certificate browser with search, filtering, and sorted results in dark mode](Code/Assets/Certitude-Screenshot.png)
 
 ## Build and run
 
