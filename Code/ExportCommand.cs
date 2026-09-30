@@ -9,9 +9,11 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Windows;
 
 namespace Certitude
 {
@@ -22,6 +24,18 @@ namespace Certitude
         {
             // Route command-line requests to export without initializing WPF.
             if (args.Length > 0) return ExportCommand.Execute(args);
+
+            // Show native startup feedback before loading WPF resources and constructing the main window.
+            var splash = new SplashScreen(typeof(EntryPoint).Assembly, "Assets/Certitude-Startup.png");
+            splash.Show(true);
+            try { return RunGui(); }
+            finally { splash.Close(TimeSpan.Zero); }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int RunGui()
+        {
+            // Defer WPF initialization until the splash is visible, including on the first launch.
             var app = new App();
             app.InitializeComponent();
             return app.Run();

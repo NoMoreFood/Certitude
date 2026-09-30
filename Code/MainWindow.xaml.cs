@@ -29,6 +29,7 @@ namespace Certitude
         private CertificateStore store;
         private CertificatePage page;
         private QuerySpec query;
+        private QuerySpec loadingQuery;
         private string sortField = nameof(CertificateRow.RequestId);
         private ListSortDirection sortDirection = ListSortDirection.Descending;
         private CertificateRow[] sortedRows;
@@ -63,16 +64,26 @@ namespace Certitude
             Height = Math.Min(Height, bounds.Height);
 
             // Debounce filter edits and preselect the local CA when one is installed.
-            filterTimer.Tick += (sender, e) => RefreshClick(sender, new RoutedEventArgs());
+            filterTimer.Tick += async (sender, e) => await Refresh(false);
             InitializeWorkspace();
             UpdateAuthorities(Array.Empty<string>());
         }
 
         private async void WindowLoaded(object sender, RoutedEventArgs e)
         {
-            // Discover available authorities before connecting to the preselected local CA.
+            // Start a known CA connection immediately while discovering other authorities in the background.
+            var configuration = ConfigurationBox.Text.Trim();
+            if (configuration.Length > 0 &&
+                !configuration.Equals(CaDirectory.AllAuthorities, StringComparison.OrdinalIgnoreCase))
+            {
+                await Task.WhenAll(Connect(), DiscoverAuthorities(false));
+                return;
+            }
+
+            // Wait for the complete authority list before restoring an All CAs connection.
             await DiscoverAuthorities();
-            if (ConfigurationBox.Text.Length > 0) await Connect();
+            if (IsVisible && workspace.Count == 0 && configuration.Length > 0 &&
+                ConfigurationBox.Text.Trim() == configuration) await Connect();
         }
 
         private void ProjectNavigate(object sender, RequestNavigateEventArgs args)
@@ -172,6 +183,7 @@ namespace Certitude
             {
                 // Track the new load and describe whether it will page, search, or sort all matches.
                 queryCancellation = request;
+                loadingQuery = targetPage == 0 ? spec : null;
                 queryLoads++;
                 UpdateControls();
                 StatusText.Text = !native ? "Sorting all matching CA records…" : spec.UsesClientSearch ?
@@ -258,7 +270,11 @@ namespace Certitude
                 finally
                 {
                     // Clear only this load state and restore controls after all outstanding loads settle.
-                    if (ReferenceEquals(queryCancellation, request)) queryCancellation = null;
+                    if (ReferenceEquals(queryCancellation, request))
+                    {
+                        queryCancellation = null;
+                        loadingQuery = null;
+                    }
                     queryLoads--;
                     UpdateControls();
                 }
@@ -266,17 +282,28 @@ namespace Certitude
             return false;
         }
 
-        private async void RefreshClick(object sender, RoutedEventArgs e)
+        private async void RefreshClick(object sender, RoutedEventArgs e) => await Refresh(true);
+
+        private async Task Refresh(bool refreshNames)
         {
             // Invalidate cached results and rerun the applied filters from the first page.
             filterTimer.Stop();
             if (busy || store == null) return;
-            if (!ReferenceEquals(sender, filterTimer)) OidNames.Invalidate();
-            sortedRows = null;
-            filtersDirty = true;
-            queryCancellation?.Cancel();
-            UpdateControls();
-            try { await LoadPage(ReadQuery(), null, 0, true); }
+            try
+            {
+                // Applying unchanged filters must not restart an identical first-page lookup already in progress.
+                var spec = ReadQuery();
+                if (!refreshNames && queryCancellation?.IsCancellationRequested == false &&
+                    spec.SameFilter(loadingQuery) && spec.PageSize == loadingQuery.PageSize) return;
+
+                // Only an explicit refresh discards directory names; normal searches reuse their timed cache.
+                if (refreshNames) OidNames.Invalidate();
+                sortedRows = null;
+                filtersDirty = true;
+                queryCancellation?.Cancel();
+                UpdateControls();
+                await LoadPage(spec, null, 0, true);
+            }
             catch (ArgumentException error) { SearchHint.Text = error.Message; }
         }
 
@@ -307,36 +334,47 @@ namespace Certitude
             filterTimer.Stop();
 
             // Clear the list immediately when changing certificate or request views.
-            if (ReferenceEquals(sender, Views))
-            {
-                page = null;
-                query = null;
-                pageIndex = 0;
-                cursors.Clear();
-                cursors.Add(null);
-                Certificates.ItemsSource = null;
-                ViewTitle.Text = Convert.ToString(((ListBoxItem)Views.SelectedItem).Content);
-                EmptyText.Visibility = Visibility.Collapsed;
-            }
-            // Debounce the lookup and prevent actions against results from the previous filters.
+            if (ReferenceEquals(sender, Views)) ClearViewRows();
+
+            // Apply pasted exact serials immediately while debouncing typing and broader searches.
+            var pastedSerial = ReferenceEquals(sender, SearchBox) &&
+                (SearchField.SelectedItem as ComboBoxItem)?.Tag as string == "SerialNumber" &&
+                MatchMode.SelectedIndex == (int)SearchMatch.Exact && e is TextChangedEventArgs changes &&
+                changes.Changes.Any(change => change.AddedLength > 1);
+            filterTimer.Interval = TimeSpan.FromMilliseconds(pastedSerial ? 0 : 400);
             filterTimer.Start();
             SearchHint.Text = "Filters changed; updating results…";
             UpdateControls();
         }
 
-        private void ClearClick(object sender, RoutedEventArgs e)
+        private void ClearViewRows()
+        {
+            // Reset page history and selection before looking up a different certificate or request view.
+            page = null;
+            query = null;
+            pageIndex = 0;
+            cursors.Clear();
+            cursors.Add(null);
+            Certificates.ItemsSource = null;
+            ViewTitle.Text = Convert.ToString(((ListBoxItem)Views.SelectedItem).Content);
+            EmptyText.Visibility = Visibility.Collapsed;
+        }
+
+        private async void ClearClick(object sender, RoutedEventArgs e)
         {
             // Clear search and expiry criteria before refreshing the current view.
             SearchBox.Clear();
             ExpiresFrom.Text = ExpiresBefore.Text = "";
-            RefreshClick(sender, e);
+            await Refresh(false);
         }
 
-        private void ExpiryPresetClick(object sender, RoutedEventArgs e)
+        private async void ExpiryPresetClick(object sender, RoutedEventArgs e)
         {
             // Translate an expiry preset into UTC bounds on issued certificates.
-            if (!IsLoaded || restoringView || ExpiryPresets.SelectedItem is not ComboBoxItem item ||
+            if (!IsLoaded || busy || store == null || restoringView ||
+                ExpiryPresets.SelectedItem is not ComboBoxItem item ||
                 !int.TryParse(Convert.ToString(item.Tag), out var days)) return;
+            var changingView = Views.SelectedIndex != 0;
             restoringView = true;
             try
             {
@@ -345,7 +383,10 @@ namespace Certitude
                 ExpiresFrom.Text = ExpiresBefore.Text = "";
             }
             finally { restoringView = false; }
-            RefreshClick(sender, e);
+
+            // A preset also switches to Issued Certificates, so remove rows from the previous view immediately.
+            if (changingView) ClearViewRows();
+            await Refresh(false);
         }
 
         private async void NextClick(object sender, RoutedEventArgs e)
@@ -402,7 +443,7 @@ namespace Certitude
             PreviousButton.IsEnabled = !working && !filtersDirty && pageIndex > 0;
             NextButton.IsEnabled = !working && !filtersDirty && page != null && page.HasMore;
             CancelButton.IsEnabled = working || filterTimer.IsEnabled;
-            Progress.Visibility = working ? Visibility.Visible : Visibility.Collapsed;
+            Progress.Visibility = working || discovering ? Visibility.Visible : Visibility.Collapsed;
             ResultsLoading.Visibility = queryLoads > 0 ? Visibility.Visible : Visibility.Collapsed;
 
             // Show current paging and selection counts or the pending-load state.
@@ -829,7 +870,7 @@ namespace Certitude
             catch (Exception error) { Record("Theme changed; preference could not be saved: " + error.Message); }
         }
 
-        private void WindowKeyDown(object sender, KeyEventArgs e)
+        private async void WindowKeyDown(object sender, KeyEventArgs e)
         {
             // Give workspace pages priority over browser keyboard shortcuts.
             if (workspace.Count > 0)
@@ -839,7 +880,12 @@ namespace Certitude
             }
             // Route search, refresh, and selected-row shortcuts to browser actions.
             if (e.Key == Key.F5) { RefreshClick(sender, e); e.Handled = true; }
-            if (e.Key == Key.Enter && SearchBox.IsKeyboardFocusWithin) { RefreshClick(sender, e); e.Handled = true; }
+            if (e.Key == Key.Enter && SearchBox.IsKeyboardFocusWithin)
+            {
+                e.Handled = true;
+                await Refresh(false);
+                return;
+            }
             if (Certificates.IsKeyboardFocusWithin && Keyboard.Modifiers == ModifierKeys.None)
             {
                 if (e.Key == Key.Enter && Certificates.SelectedItems.Count == 1)
@@ -943,22 +989,33 @@ namespace Certitude
             ConfigurationBox.Text = current;
         }
 
-        private async Task DiscoverAuthorities()
+        private async Task DiscoverAuthorities(bool showBusy = true)
         {
-            // Prevent overlapping discovery and show busy feedback while reading the forest.
+            // Prevent overlapping discovery without keeping the startup cursor busy after CA results arrive.
             if (discovering) return;
-            using var cursor = BusyCursor.Enter();
+            using var cursor = showBusy ? BusyCursor.Enter() : null;
             discovering = true;
             DiscoverButton.IsEnabled = false;
+            DiscoverButton.Content = "_Finding CAs...";
+            const string status = "Discovering Certificate Authorities...";
+            if (!busy && queryLoads == 0) StatusText.Text = status;
             UpdateControls();
             try
             {
                 // Merge directory discovery results into the CA selector.
                 var authorities = await Task.Run(() => CaDirectory.Discover());
                 UpdateAuthorities(authorities);
+                if (StatusText.Text == status)
+                    StatusText.Text = $"Found {authorities.Count:N0} Certificate Authorities. Select A CA And Connect.";
             }
             catch (Exception error) { Record("CA discovery: " + CaAdministration.Error(error)); }
-            finally { discovering = false; DiscoverButton.IsEnabled = true; UpdateControls(); }
+            finally
+            {
+                discovering = false;
+                DiscoverButton.IsEnabled = true;
+                DiscoverButton.Content = "_Find CAs";
+                UpdateControls();
+            }
         }
     }
 }

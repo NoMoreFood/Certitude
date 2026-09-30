@@ -357,7 +357,10 @@ namespace Certitude
             token.ThrowIfCancellationRequested();
             if (query.ExactId.HasValue && before.HasValue && query.ExactId.Value >= before.Value) yield break;
             if (query.Field == "Configuration" && query.Value.Length > 0 && !query.MatchesText(Configuration)) yield break;
-            var names = Oids;
+
+            // Load directory names before the query only when template labels participate in filtering.
+            var names = query.Value.Length > 0 && (query.Field == "All" || query.Field == "CertificateTemplate") ?
+                Oids : null;
             token.ThrowIfCancellationRequested();
 
             // Parallelize client-side scans unless the CA name alone already matches every candidate.
@@ -537,7 +540,7 @@ namespace Certitude
                                 if (ordinal == 3)
                                 {
                                     row.Template = Convert.ToString(value, CultureInfo.InvariantCulture);
-                                    row.ResolvedTemplate = names.Template(row.Template);
+                                    row.ResolvedTemplate = names?.Template(row.Template);
                                 }
                                 // Stop reading a row as soon as its selected search field fails to match.
                                 if (ordinal == searchColumn && !(ordinal == 3 ? query.MatchesTemplate(row) :
@@ -564,8 +567,13 @@ namespace Certitude
                         token.ThrowIfCancellationRequested();
                         if (row.RequestId < 1)
                             throw new InvalidOperationException("The CA returned no request ID for a row.");
-                        if (rejected) continue;
-                        if (query.Matches(row)) yield return row;
+                        if (rejected || !query.Matches(row)) continue;
+
+                        // Resolve display labels only for matching rows when the search does not need them.
+                        names ??= Oids;
+                        row.ResolvedTemplate ??= names.Template(row.Template);
+                        token.ThrowIfCancellationRequested();
+                        yield return row;
                     }
                 }
             }

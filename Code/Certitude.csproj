@@ -45,6 +45,7 @@ Licensed under GPLv3. See LICENSE.md.
     <None Include="App.config" />
     <Resource Include="Assets\Certitude.ico" />
     <Resource Include="Assets\Certitude.png" />
+    <Resource Include="Assets\Certitude-Startup.png" />
     <None Include="Assets\Certitude.svg" />
     <None Include="Assets\Generate-Icon.ps1" />
     <ApplicationDefinition Include="App.xaml" />

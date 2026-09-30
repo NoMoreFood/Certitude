@@ -74,3 +74,32 @@ finally { $writer.Dispose() }
 
 # Save the largest frame separately for the application title artwork.
 [System.IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'Certitude.png'), $frames[-1].Bytes)
+
+# Reuse the certificate artwork in a compact native startup screen.
+$visual = [System.Windows.Media.DrawingVisual]::new()
+$drawing = $visual.RenderOpen()
+$background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182D43')
+$muted = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#C4D4E0')
+$drawing.DrawRoundedRectangle($background, $null, [System.Windows.Rect]::new(0, 0, 440, 148), 8, 8)
+$drawing.DrawImage($bitmap, [System.Windows.Rect]::new(28, 34, 80, 80))
+
+# Render the title and launch message into the image so WPF need not load to display them.
+$culture = [System.Globalization.CultureInfo]::InvariantCulture
+$direction = [System.Windows.FlowDirection]::LeftToRight
+$title = [System.Windows.Media.FormattedText]::new('Certitude', $culture, $direction,
+    [System.Windows.Media.Typeface]::new('Segoe UI Semibold'), 32, [System.Windows.Media.Brushes]::White, 1.0)
+$message = [System.Windows.Media.FormattedText]::new('Starting...', $culture, $direction,
+    [System.Windows.Media.Typeface]::new('Segoe UI'), 15, $muted, 1.0)
+$drawing.DrawText($title, [System.Windows.Point]::new(126, 33))
+$drawing.DrawText($message, [System.Windows.Point]::new(128, 82))
+$drawing.Close()
+
+# Embed the splash artwork without adding a runtime graphics or font dependency.
+$splash = [System.Windows.Media.Imaging.RenderTargetBitmap]::new(440, 148, 96, 96,
+    [System.Windows.Media.PixelFormats]::Pbgra32)
+$splash.Render($visual)
+$encoder = [System.Windows.Media.Imaging.PngBitmapEncoder]::new()
+$encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($splash))
+$stream = [System.IO.File]::Create((Join-Path $PSScriptRoot 'Certitude-Startup.png'))
+try { $encoder.Save($stream) }
+finally { $stream.Dispose() }

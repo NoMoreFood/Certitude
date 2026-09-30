@@ -17,7 +17,7 @@ msbuild Code\Certitude.sln /m /p:Configuration=Release /p:Platform=x64
 
 Run on Windows with Desktop Experience, .NET Framework 4.7.2+ and AD CS management tools. Deploy `Certitude.exe` and `Certitude.exe.config` together from `Code\bin\Release`. Running on 4.8+ also enables its newer WPF accessibility, DPI and cryptography behavior.
 
-[Build/Build.cmd](Build/Build.cmd) creates a signed portable ZIP in `Binaries`. It requires PowerShell 5.1+, Windows SDK SignTool, a code-signing certificate and timestamp-service access. It deletes prior staging contents and the same-version ZIP before rebuilding.
+[Build/Build.cmd](Build/Build.cmd) creates a signed portable ZIP in `Binaries`. It requires PowerShell 5.1+, Windows SDK SignTool, a code-signing certificate and timestamp-service access. It clears staging contents within `Build` and replaces an existing same-version ZIP only after building, signing and packaging succeed.
 
 ### Connect to a CA
 

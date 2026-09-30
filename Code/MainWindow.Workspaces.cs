@@ -1,3 +1,8 @@
+//
+// Copyright (c) Bryan Berns.
+// Licensed under GPLv3. See LICENSE.md.
+//
+
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;

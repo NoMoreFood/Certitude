@@ -30,8 +30,26 @@ try
     $projectDirectory = Join-Path $repositoryDirectory 'Code'
     $BinaryDirectory = [IO.Path]::GetFullPath($BinaryDirectory)
     $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-    $StageDirectory = [IO.Path]::GetFullPath($StageDirectory)
+    $StageDirectory = [IO.Path]::GetFullPath($StageDirectory).TrimEnd('\')
     $executable = Join-Path $BinaryDirectory 'Certitude.exe'
+
+    # Restrict recursive cleanup to a staging folder inside Build, separate from input and release folders.
+    $comparison = [StringComparison]::OrdinalIgnoreCase
+    $stagePrefix = $StageDirectory + '\'
+    if (!$StageDirectory.StartsWith($PSScriptRoot + '\', $comparison) -or
+        (Test-Path -LiteralPath $StageDirectory -PathType Leaf))
+    {
+        throw 'StageDirectory must be a child folder of the Build directory.'
+    }
+    foreach ($protectedDirectory in @($BinaryDirectory, $OutputDirectory))
+    {
+        $protectedPrefix = $protectedDirectory.TrimEnd('\') + '\'
+        if ($stagePrefix.StartsWith($protectedPrefix, $comparison) -or
+            $protectedPrefix.StartsWith($stagePrefix, $comparison))
+        {
+            throw 'StageDirectory must not overlap the binary or release output directory.'
+        }
+    }
 
     # Derive the portable package name from the declared release version.
     $assemblyInfo = Get-Content -LiteralPath "$projectDirectory\App.xaml.cs" -Raw -Encoding UTF8
@@ -42,9 +60,8 @@ try
     $packageName = "Certitude-$version-x64.zip"
     $packagePath = Join-Path $OutputDirectory $packageName
 
-    # Clear prior staging content and the same-version package before rebuilding.
+    # Clear validated staging content while preserving the published release until signing succeeds.
     if (Test-Path -LiteralPath $StageDirectory) { Remove-Item -LiteralPath $StageDirectory -Recurse -Force }
-    if (Test-Path -LiteralPath $packagePath) { Remove-Item -LiteralPath $packagePath -Force }
 
     # Locate MSBuild through Visual Studio discovery, falling back to the command path.
     $msbuild = $null
@@ -136,7 +153,19 @@ try
     [IO.Compression.ZipFile]::CreateFromDirectory($portableDirectory, $stagedPackage,
         [IO.Compression.CompressionLevel]::Optimal, $false)
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
-    [IO.File]::Copy($stagedPackage, $packagePath, $false)
+
+    # Copy beside the destination before atomically replacing a previously published release.
+    $pendingPackage = Join-Path $OutputDirectory ('.Certitude-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try
+    {
+        [IO.File]::Copy($stagedPackage, $pendingPackage, $false)
+        if ([IO.File]::Exists($packagePath)) { [IO.File]::Replace($pendingPackage, $packagePath, [NullString]::Value) }
+        else { [IO.File]::Move($pendingPackage, $packagePath) }
+    }
+    finally
+    {
+        if ([IO.File]::Exists($pendingPackage)) { [IO.File]::Delete($pendingPackage) }
+    }
     Write-Host "Signed portable release ready: $packagePath"
 }
 catch

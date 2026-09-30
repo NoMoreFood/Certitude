@@ -12,8 +12,8 @@ using System.Windows.Media;
 [assembly: AssemblyTitle("Certitude")]
 [assembly: AssemblyProduct("Certitude")]
 [assembly: AssemblyDescription("Windows Certificate Authority administration")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
 
 namespace Certitude
 {
