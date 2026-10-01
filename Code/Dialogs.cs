@@ -106,18 +106,24 @@ namespace Certitude
             return actions;
         }
 
-        public static TextBox Field(Panel panel, string label, string value = "", bool multiline = false)
+        public static TextBox Field(Panel panel, string label, string value = "", bool multiline = false,
+            double width = 480)
         {
-            // Pair a glyph label with a single-line or scrolling multiline editor.
+            // Keep single-line fields compact while giving multiline editors the available reading space.
             var caption = Glyphs.Label(label);
+            if (label.Contains("UTC")) TimeDisplay.Label(caption, ContentControl.ContentProperty, Caption(label));
             caption.Margin = new Thickness(0, 5, 0, 3);
             panel.Children.Add(caption);
             var box = new TextBox
             {
                 Text = value, AcceptsReturn = multiline, Height = multiline ? 88 : double.NaN,
+                Width = multiline ? double.NaN : width,
+                HorizontalAlignment = multiline ? HorizontalAlignment.Stretch : HorizontalAlignment.Left,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
             };
+            if (!multiline) box.SetBinding(FrameworkElement.MaxWidthProperty,
+                new Binding("ActualWidth") { Source = panel });
             panel.Children.Add(box);
             return box;
         }
@@ -137,7 +143,9 @@ namespace Certitude
                 "\r\n\r\n" + detail);
         }
 
-        public static async Task<bool> Confirm(DependencyObject owner, string title, string text)
+        public static Task<bool> Confirm(DependencyObject owner, string title, string text) =>
+            Confirm(owner, title, () => text);
+        public static async Task<bool> Confirm(DependencyObject owner, string title, Func<string> text)
         {
             // Present confirmation in the main workspace with explicit continue and cancel actions.
             var page = new WorkspacePage { Owner = owner, Title = Caption(title) };
@@ -147,9 +155,11 @@ namespace Certitude
             layout.Children.Add(buttons);
             Button(buttons, "_Continue", () => page.DialogResult = true);
             Button(buttons, "_Cancel", page.Close);
-            layout.Children.Add(new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true,
+            var output = new TextBox { IsReadOnly = true, AcceptsReturn = true,
                 TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                VerticalContentAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 0, 0, 8) });
+                VerticalContentAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 0, 0, 8) };
+            TimeDisplay.Text(output, text);
+            layout.Children.Add(output);
             page.Content = layout;
             return await page.ShowAsync() == true;
         }
@@ -162,11 +172,22 @@ namespace Certitude
             return await page.ShowAsync() == true ? page.Values[0] : null;
         }
 
-        public static void Report(DependencyObject owner, string title, string text)
+        public static void Report(DependencyObject owner, string title, string text) =>
+            Report(owner, title, () => text);
+        public static void Report(DependencyObject owner, string title, TimeReport text) =>
+            Report(owner, title, () => text.ToString());
+        public static void Report(DependencyObject owner, string title, Func<string> text)
         {
             // Create a workspace report with save and back controls.
             var page = new WorkspacePage { Owner = owner, Title = Caption(title) };
             var layout = new DockPanel { Margin = new Thickness(8) };
+            var output = new TextBox
+            {
+                IsReadOnly = true, AcceptsReturn = true, FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 0, 0, 6), VerticalContentAlignment = VerticalAlignment.Top
+            };
+            TimeDisplay.Text(output, text);
             var buttons = new WrapPanel();
             DockPanel.SetDock(buttons, Dock.Bottom);
             layout.Children.Add(buttons);
@@ -175,34 +196,36 @@ namespace Certitude
                 // Save the report text and surface file errors through the main status area.
                 var save = new FilePicker(true) { FileName = "Certitude-log.txt", Filter = "Text|*.txt", Owner = page };
                 if (await save.ShowAsync() != true) return;
-                try { File.WriteAllText(save.FileName, text); }
+                try { File.WriteAllText(save.FileName, output.Text); }
                 catch (Exception error) { ((MainWindow)Application.Current.MainWindow).Notify(CaAdministration.Error(error)); }
             });
 
             // Show report text in a scrolling read-only pane.
             Button(buttons, "_Back", page.Close);
-            layout.Children.Add(new TextBox
-            {
-                Text = text, IsReadOnly = true, AcceptsReturn = true, FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Margin = new Thickness(0, 0, 0, 6), VerticalContentAlignment = VerticalAlignment.Top
-            });
+            layout.Children.Add(output);
             page.Content = layout;
             page.Show();
         }
 
-        public static async void Certificate(DependencyObject owner, byte[] encoded, OidNames names = null,
+        public static async Task Certificate(DependencyObject owner, byte[] encoded, OidNames names = null,
             bool refreshNames = true)
         {
             // Decode certificate details in the background before opening their workspace page.
+            var window = (MainWindow)Application.Current.MainWindow;
+            if (owner is WorkspacePage page && window.ActivePage != page) return;
+            var navigation = window.NavigationVersion;
             using var cursor = BusyCursor.Enter();
             try
             {
                 var details = await Task.Run(() => DetailsWindow.Describe(encoded,
                     refreshNames ? names?.Refresh() ?? OidNames.Local : names ?? OidNames.Windows));
-                new DetailsWindow(0, details) { Owner = owner }.Show();
+                if (window.NavigationVersion == navigation)
+                    new DetailsWindow(0, details) { Owner = owner }.Show();
             }
-            catch (Exception error) { ((MainWindow)Application.Current.MainWindow).Notify(CaAdministration.Error(error)); }
+            catch (Exception error)
+            {
+                if (window.NavigationVersion == navigation) window.Notify(CaAdministration.Error(error));
+            }
         }
 
         public static void WindowsCertificate(DependencyObject owner, byte[] encoded)
@@ -379,12 +402,13 @@ namespace Certitude
                     "4 · Superseded", "5 · Cessation Of Operation", "6 · Certificate Hold", "8 · Remove From CRL",
                     "9 · Privilege Withdrawn", "10 · Attribute Authority Compromise"
                 },
-                SelectedIndex = 0
+                SelectedIndex = 0, Width = 320, HorizontalAlignment = HorizontalAlignment.Left
             };
 
-            // Provide an optional UTC effective time with inline validation feedback.
+            // Provide an optional effective time in the selected zone with inline validation feedback.
             panel.Children.Add(reason);
-            effective = Dialogs.Field(panel, "Effective Time (UTC)");
+            effective = Dialogs.Field(panel, "Effective Time (UTC)", width: 220);
+            TimeDisplay.Input(this, effective);
             Dialogs.Note(panel, "Use yyyy-MM-dd HH:mm:ss, or leave empty for immediately. " +
                 "Only certificate hold can be reversed. Publish a CRL after changing revocation state.");
             var error = new TextBlock { TextWrapping = TextWrapping.Wrap };
@@ -393,15 +417,15 @@ namespace Certitude
             panel.Children.Add(buttons);
             Dialogs.Button(buttons, "_Continue", () =>
             {
-                // Accept immediate revocation or require an explicitly formatted UTC time.
+                // Accept immediate revocation or convert an explicitly formatted time to UTC.
                 if (effective.Text.Trim().Length == 0) { Effective = null; DialogResult = true; return; }
-                if (!DateTime.TryParseExact(effective.Text.Trim(), "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date))
+                try { Effective = TimeDisplay.Parse(effective.Text, format: "yyyy-MM-dd HH:mm:ss"); }
+                catch (Exception exception) when (exception is FormatException or ArgumentException)
                 {
-                    error.Text = "Enter the UTC time as yyyy-MM-dd HH:mm:ss.";
+                    error.Text = "Enter a valid " + TimeDisplay.Current.Zone.ToLowerInvariant() +
+                        " time as yyyy-MM-dd HH:mm:ss.";
                     return;
                 }
-                Effective = date;
                 DialogResult = true;
             });
             Dialogs.Button(buttons, "_Cancel", Close);
@@ -426,8 +450,6 @@ namespace Certitude
                     new[] { "Subject", metadata.Subject }, new[] { "Issuer", metadata.Issuer },
                     new[] { "Version", certificate.Version.ToString() }, new[] { "Serial Number", metadata.SerialNumber },
                     new[] { "SHA-1 Thumbprint", metadata.Thumbprint }, new[] { "SHA-256", metadata.Sha256 },
-                    new[] { "Valid From (UTC)", metadata.NotBefore.ToString("u") },
-                    new[] { "Expires (UTC)", metadata.NotAfter.ToString("u") },
                     new[] { "Public Key", metadata.Algorithm + " · " + metadata.KeyBits + " Bits" },
                     new[] { "Public Key (Base64)", Convert.ToBase64String(certificate.GetPublicKey()) },
                     new[] { "Signature Algorithm", names.Describe(certificate.SignatureAlgorithm.Value, 4) },
@@ -437,13 +459,16 @@ namespace Certitude
                     new[] { "Certificate Template", metadata.Template }, new[] { "OID Resolution", names.Status },
                     new[] { "Certificate Object Identifiers", names.Identifiers(encoded) }
                 }) detail.Values.Add(new DetailValue { Name = field[0], Value = field[1] });
+                detail.Values.Insert(6, new DetailValue { Name = "Valid From (UTC)", Time = metadata.NotBefore });
+                detail.Values.Insert(7, new DetailValue { Name = "Expires (UTC)", Time = metadata.NotAfter });
 
                 // Keep both readable extension values and their original DER encodings.
                 foreach (var extension in certificate.Extensions.Cast<X509Extension>())
                 {
                     var name = Dialogs.Caption(names.Name(extension.Oid.Value, 6)) + " · " + extension.Oid.Value;
                     if (extension.Critical) name += " · Critical";
-                    detail.Values.Add(new DetailValue { Name = name, Value = names.FormatExtension(extension) });
+                    detail.Values.Add(new DetailValue { Name = name,
+                        Report = new TimeReport().Append(() => names.FormatExtension(extension)) });
                     detail.Values.Add(new DetailValue { Name = name + " · DER (Base64)",
                         Value = Convert.ToBase64String(extension.RawData) });
                 }
@@ -499,7 +524,7 @@ namespace Certitude
             VirtualizingPanel.SetScrollUnit(grid, ScrollUnit.Pixel);
             grid.Columns.Add(new DataGridTextColumn { Header = "Property / Attribute / Extension",
                 Binding = new Binding("Name"), ElementStyle = text, Width = 270 });
-            grid.Columns.Add(new DataGridTextColumn { Header = "Value (UTC / Base64)", Binding = new Binding("Value"),
+            grid.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new Binding("Value"),
                 ElementStyle = text, Width = new DataGridLength(1, DataGridLengthUnitType.Star), MinWidth = 100 });
 
             // Connect certificate menus, sorting feedback, and selected-value preview updates.
@@ -507,6 +532,11 @@ namespace Certitude
             Dialogs.CertificateMenu(value, () => detail.Certificate);
             BusyCursor.OnSorting(grid);
             grid.SelectionChanged += (sender, e) => value.Text = (grid.SelectedItem as DetailValue)?.Value ?? "";
+            TimeChanged += previousUtc =>
+            {
+                grid.Items.Refresh();
+                value.Text = (grid.SelectedItem as DetailValue)?.Value ?? "";
+            };
             layout.Children.Add(grid);
             Content = layout;
         }

@@ -42,19 +42,41 @@ Licensed under GPLv3. See LICENSE.md.
                        Foreground="{DynamicResource HeaderMuted}" />
           </StackPanel>
         </StackPanel>
-        <Button x:Name="ThemeButton" DockPanel.Dock="Right" Content="{DynamicResource ThemeAction}"
-                Click="ThemeClick" Margin="7,0,0,0" VerticalAlignment="Bottom" local:Glyphs.Icon="{x:Static local:Glyphs.Theme}" />
-        <StackPanel x:Name="ConnectionPanel">
+        <StackPanel DockPanel.Dock="Right" Margin="7,0,0,0" VerticalAlignment="Center">
+          <CheckBox x:Name="UtcToggle" Content="Show Times In _UTC" Click="UtcClick" Margin="0,0,0,4"
+                    Foreground="{DynamicResource HeaderInk}" ToolTip="Use UTC instead of the current local time zone." />
+          <Button x:Name="ThemeButton" Content="{DynamicResource ThemeAction}" Click="ThemeClick"
+                  HorizontalAlignment="Right" Margin="0" local:Glyphs.Icon="{x:Static local:Glyphs.Theme}" />
+        </StackPanel>
+        <StackPanel x:Name="ConnectionPanel" HorizontalAlignment="Left">
           <Label Content="Certificate Authority" Style="{StaticResource FieldLabelStyle}"
                  local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}"
-                 Foreground="{DynamicResource HeaderMuted}" FontSize="11" Margin="0,0,0,2" />
+                 Foreground="{DynamicResource HeaderMuted}" FontSize="11" Margin="0,0,0,4" />
           <DockPanel>
             <Button DockPanel.Dock="Right" Content="_Connect" Click="ConnectClick" Margin="5,0,0,0"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Connect}" />
             <Button x:Name="DiscoverButton" DockPanel.Dock="Right" Content="_Find CAs" Click="DiscoverClick" Margin="5,0,0,0"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
-            <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False"
-                      ToolTip="Select All CAs to search every listed authority, select one CA, or enter SERVER\CA Name." />
+            <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False" Width="360"
+                      ToolTip="Select All Certificate Authorities to search every listed authority, select one CA, or enter SERVER\CA Name.">
+              <ComboBox.ItemTemplate>
+                <DataTemplate>
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock x:Name="AllAuthoritiesGlyph" FontFamily="{StaticResource GlyphFont}"
+                               Text="{x:Static local:Glyphs.SelectAll}" Foreground="{DynamicResource Accent}"
+                               Margin="0,0,6,0" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <TextBlock x:Name="AuthorityCaption" Text="{Binding}" VerticalAlignment="Center" />
+                  </StackPanel>
+                  <DataTemplate.Triggers>
+                    <DataTrigger Binding="{Binding}" Value="{x:Static local:MainWindow.AllAuthoritiesCaption}">
+                      <Setter TargetName="AllAuthoritiesGlyph" Property="Visibility" Value="Visible" />
+                      <Setter TargetName="AuthorityCaption" Property="FontWeight" Value="SemiBold" />
+                      <Setter TargetName="AuthorityCaption" Property="Foreground" Value="{DynamicResource Accent}" />
+                    </DataTrigger>
+                  </DataTemplate.Triggers>
+                </DataTemplate>
+              </ComboBox.ItemTemplate>
+            </ComboBox>
           </DockPanel>
         </StackPanel>
       </DockPanel>
@@ -113,16 +135,22 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="StatisticsButton" Content="_Statistics" Click="StatisticsClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Statistics}" />
-            <Button x:Name="NativeCaButton" Content="Native CA MMC" Click="NativeCaClick"
+            <Button x:Name="NativeCaButton" Content="CA MMC" Click="NativeCaClick"
                     HorizontalContentAlignment="Left" Margin="0,8,0,4"
                     ToolTip="Open the Windows Certification Authority console; select its target independently."
                     local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
-            <Button x:Name="NativeTemplatesButton" Content="Native Templates MMC" Click="NativeTemplatesClick"
+            <Button x:Name="NativeTemplatesButton" Content="Templates MMC" Click="NativeTemplatesClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4"
                     ToolTip="Open the Windows Certificate Templates console using your Windows identity."
                     local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
-            <TextBlock Text="Windows Authentication" FontSize="10"
-                       Foreground="{DynamicResource Muted}" Margin="4,8,0,0" />
+            <TextBlock Text="Links" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{DynamicResource Muted}" Margin="4,12,0,5" />
+            <StackPanel x:Name="LinksPanel" />
+            <Button x:Name="AddLinkButton" Content="Add _Link..." Click="AddLinkClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Edit}" />
+            <TextBlock x:Name="LinksNotice" Visibility="Collapsed" TextWrapping="Wrap" FontSize="10"
+                       Margin="4,3,4,0" />
           </StackPanel>
         </ScrollViewer>
       </Border>
@@ -165,7 +193,7 @@ Licensed under GPLv3. See LICENSE.md.
           <Border Grid.Row="1" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
                   BorderThickness="1" Padding="6" Margin="0,0,0,15">
             <StackPanel x:Name="FilterPanel" IsEnabled="False">
-              <Grid>
+              <Grid Width="800" MaxWidth="{Binding ActualWidth, ElementName=FilterPanel}" HorizontalAlignment="Left">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="152" /><ColumnDefinition Width="105" />
                   <ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
@@ -201,11 +229,11 @@ Licensed under GPLv3. See LICENSE.md.
               <WrapPanel Margin="0,5,0,0">
                 <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
                   <TextBlock Text="Expires From" VerticalAlignment="Center" Margin="0,0,6,0" />
-                  <TextBox x:Name="ExpiresFrom" Width="92" TextChanged="FilterChanged" ToolTip="UTC Date: yyyy-MM-dd" />
+                  <TextBox x:Name="ExpiresFrom" Width="153" TextChanged="FilterChanged" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
                   <TextBlock Text="Before" VerticalAlignment="Center" Margin="0,0,6,0" />
-                  <TextBox x:Name="ExpiresBefore" Width="92" TextChanged="FilterChanged" ToolTip="UTC Date: yyyy-MM-dd" />
+                  <TextBox x:Name="ExpiresBefore" Width="153" TextChanged="FilterChanged" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
                   <TextBlock Text="Page Size" VerticalAlignment="Center" Margin="0,0,6,0" />

@@ -22,6 +22,7 @@ namespace Certitude
 {
     public partial class MainWindow : Window
     {
+        public const string AllAuthoritiesCaption = "All Certificate Authorities";
         private readonly List<CertificateRow> cursors = new List<CertificateRow> { null };
         private readonly DispatcherTimer filterTimer = new DispatcherTimer
             { Interval = TimeSpan.FromMilliseconds(400) };
@@ -51,6 +52,7 @@ namespace Certitude
         {
             // Initialize version and row actions before sizing the browser for the available screen.
             InitializeComponent();
+            Closed += (sender, e) => NavigationVersion++;
             VersionText.Text = "Version " + typeof(App).Assembly.GetName().Version.ToString(3);
             BuildContextMenu();
             UpdateContextMenu();
@@ -67,12 +69,13 @@ namespace Certitude
             filterTimer.Tick += async (sender, e) => await Refresh(false);
             InitializeWorkspace();
             UpdateAuthorities(Array.Empty<string>());
+            ReloadLinks();
         }
 
         private async void WindowLoaded(object sender, RoutedEventArgs e)
         {
             // Start a known CA connection immediately while discovering other authorities in the background.
-            var configuration = ConfigurationBox.Text.Trim();
+            var configuration = ReadConfiguration();
             if (configuration.Length > 0 &&
                 !configuration.Equals(CaDirectory.AllAuthorities, StringComparison.OrdinalIgnoreCase))
             {
@@ -83,7 +86,7 @@ namespace Certitude
             // Wait for the complete authority list before restoring an All CAs connection.
             await DiscoverAuthorities();
             if (IsVisible && workspace.Count == 0 && configuration.Length > 0 &&
-                ConfigurationBox.Text.Trim() == configuration) await Connect();
+                ReadConfiguration() == configuration) await Connect();
         }
 
         private void ProjectNavigate(object sender, RequestNavigateEventArgs args)
@@ -106,7 +109,7 @@ namespace Certitude
             {
                 // Create the selected single-CA or combined connection and update its identity display.
                 filterTimer.Stop();
-                var configuration = ConfigurationBox.Text.Trim();
+                var configuration = ReadConfiguration();
                 store = configuration.Equals(CaDirectory.AllAuthorities, StringComparison.OrdinalIgnoreCase) ?
                     new AllCertificateStore(configurations.Select(value => new CertificateStore(value))) :
                     new CertificateStore(configuration);
@@ -140,7 +143,8 @@ namespace Certitude
 
         private QuerySpec ReadQuery()
         {
-            UpdateRelativeExpiry();
+            var now = DateTime.UtcNow;
+            UpdateRelativeExpiry(now);
             // Capture and validate browser controls as a single query specification.
             var tag = Convert.ToString(((ListBoxItem)Views.SelectedItem).Tag);
             var spec = new QuerySpec
@@ -149,7 +153,8 @@ namespace Certitude
                 Field = Convert.ToString(((ComboBoxItem)SearchField.SelectedItem).Tag),
                 Value = SearchBox.Text.Trim(),
                 Match = (SearchMatch)MatchMode.SelectedIndex,
-                ExpiresFrom = ReadDate(ExpiresFrom), ExpiresBefore = ReadDate(ExpiresBefore),
+                ExpiresFrom = expiryDays > 0 ? now : expiryDays.HasValue ? null : ReadDate(ExpiresFrom),
+                ExpiresBefore = expiryDays.HasValue ? now.AddDays(expiryDays.Value) : ReadDate(ExpiresBefore),
                 PageSize = int.Parse(Convert.ToString(((ComboBoxItem)PageSize.SelectedItem).Content))
             };
             spec.Validate();
@@ -158,13 +163,28 @@ namespace Certitude
 
         private static DateTime? ReadDate(TextBox picker)
         {
-            // Interpret an entered expiry date as a UTC day boundary.
+            // Interpret an entered expiry date or timestamp in the selected display zone.
             if (string.IsNullOrWhiteSpace(picker.Text)) return null;
-            if (!DateTime.TryParseExact(picker.Text.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture,
-                DateTimeStyles.None, out var date) &&
-                !DateTime.TryParse(picker.Text, CultureInfo.CurrentCulture, DateTimeStyles.None, out date))
-                throw new ArgumentException("Enter a valid expiry date.");
-            return DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
+            try { return TimeDisplay.Parse(picker.Text); }
+            catch (FormatException) { throw new ArgumentException("Enter a valid expiry date or time."); }
+        }
+
+        private void UtcClick(object sender, RoutedEventArgs e)
+        {
+            // Preserve pending date filters and refresh every open page without repeating remote operations.
+            var previousUtc = TimeDisplay.Current.UseUtc;
+            try
+            {
+                var from = ReadDate(ExpiresFrom);
+                var before = ReadDate(ExpiresBefore);
+                TimeDisplay.Current.UseUtc = UtcToggle.IsChecked == true;
+                restoringView = true;
+                try { ExpiresFrom.Text = TimeDisplay.Entry(from); ExpiresBefore.Text = TimeDisplay.Entry(before); }
+                finally { restoringView = false; }
+                foreach (var page in workspace) page.RefreshTimes(previousUtc);
+                PersistWorkspace();
+            }
+            catch (Exception error) { UtcToggle.IsChecked = previousUtc; ShowError(error); }
         }
 
         private async Task<bool> LoadPage(QuerySpec spec, CertificateRow before, int targetPage, bool reset)
@@ -336,12 +356,12 @@ namespace Certitude
             // Clear the list immediately when changing certificate or request views.
             if (ReferenceEquals(sender, Views)) ClearViewRows();
 
-            // Apply pasted exact serials immediately while debouncing typing and broader searches.
+            // Apply view changes and pasted exact serials immediately while debouncing typed filters.
             var pastedSerial = ReferenceEquals(sender, SearchBox) &&
                 (SearchField.SelectedItem as ComboBoxItem)?.Tag as string == "SerialNumber" &&
                 MatchMode.SelectedIndex == (int)SearchMatch.Exact && e is TextChangedEventArgs changes &&
                 changes.Changes.Any(change => change.AddedLength > 1);
-            filterTimer.Interval = TimeSpan.FromMilliseconds(pastedSerial ? 0 : 400);
+            filterTimer.Interval = TimeSpan.FromMilliseconds(ReferenceEquals(sender, Views) || pastedSerial ? 0 : 400);
             filterTimer.Start();
             SearchHint.Text = "Filters changed; updating results…";
             UpdateControls();
@@ -650,16 +670,18 @@ namespace Certitude
                 Certificates.SelectedItems.Count != 1 || Certificates.SelectedItem is not CertificateRow row) return;
             await Run("Loading certificate…", async token =>
             {
-                // Load complete certificate data before opening validation, viewing, or export.
+                // Retain full validation context and use a certificate-only query for viewing or export.
                 var source = store.ForRow(row);
-                var detail = await Task.Run(() => source.ReadDetails(row.RequestId, token), token);
+                var detail = validate ? await Task.Run(() => source.ReadDetails(row.RequestId, token), token) : null;
+                var certificate = validate ? detail.Certificate :
+                    await Task.Run(() => source.ReadCertificate(row.RequestId, token), token);
                 token.ThrowIfCancellationRequested();
-                if (detail.Certificate == null) throw new InvalidOperationException("This request has no certificate.");
-                if (windows) Dialogs.WindowsCertificate(this, detail.Certificate);
+                if (certificate == null) throw new InvalidOperationException("This request has no certificate.");
+                if (windows) Dialogs.WindowsCertificate(this, certificate);
                 else if (validate)
-                    new ValidationWindow(detail.Certificate, "Request " + row.RequestId + " — " + source.Configuration,
+                    new ValidationWindow(certificate, "Request " + row.RequestId + " — " + source.Configuration,
                         detail.Oids) { Owner = this }.Show();
-                else await Dialogs.ExportCertificate(this, detail.Certificate, row.RequestId + ".cer");
+                else await Dialogs.ExportCertificate(this, certificate, row.RequestId + ".cer");
             });
         }
 
@@ -698,7 +720,6 @@ namespace Certitude
                     "copies from Windows certificate stores. Deleting revoked records can remove their entries " +
                     "from future CRLs.\r\n\r\nSelected: " + string.Join(", ", selected.GroupBy(row => row.Status)
                         .Select(group => group.Count() + " " + group.Key)) :
-                    action == "Revoke" ? $"Reason: {reason}. Effective: {effective?.ToString("u") ?? "immediately"}." :
                     action == "Set attributes" ? attributes : "";
 
                 // Group confirmation targets by CA so duplicate request IDs remain unambiguous.
@@ -708,8 +729,9 @@ namespace Certitude
                     string.Join(", ", group.Take(20).Select(row => row.RequestId)) +
                     (group.Count() > 20 ? ", …" : "")));
                 if (!await Dialogs.Confirm(this, "Confirm " + title,
-                    $"{title}: {selected.Length:N0} selected record(s)\r\n\r\n" +
-                    targets + "\r\n\r\n" + detail)) return;
+                    () => $"{title}: {selected.Length:N0} selected record(s)\r\n\r\n" +
+                    targets + "\r\n\r\n" + (action == "Revoke" ? $"Reason: {reason}. Effective: " +
+                        (effective.HasValue ? TimeDisplay.Stamp(effective) : "immediately") + "." : detail))) return;
 
                 // Apply the confirmed changes with selection-wide progress and an operation report.
                 await Run(action + "…", async token =>
@@ -915,11 +937,14 @@ namespace Certitude
         }
 
         internal void Notify(string text) => Record(text);
+        internal WorkspacePage ActivePage => workspace.LastOrDefault();
+        internal long NavigationVersion { get; private set; }
 
         internal void ShowPage(WorkspacePage page)
         {
             // Push a new workspace page only once and reveal it above the browser.
             if (workspace.Contains(page)) return;
+            NavigationVersion++;
             workspace.Add(page);
             UpdateWorkspace();
         }
@@ -928,6 +953,7 @@ namespace Certitude
         {
             // Complete only the top workspace page when navigating back.
             if (workspace.LastOrDefault() != page) return;
+            NavigationVersion++;
             workspace.RemoveAt(workspace.Count - 1);
             UpdateWorkspace();
             page.Complete(result);
@@ -948,6 +974,7 @@ namespace Certitude
         {
             // Close the workspace stack only after every page permits navigation.
             if (workspace.Any(page => !page.CanClose())) return false;
+            NavigationVersion++;
             var previous = workspace.ToArray();
             workspace.Clear();
             UpdateWorkspace();
@@ -980,13 +1007,21 @@ namespace Certitude
 
         private async void DiscoverClick(object sender, RoutedEventArgs e) => await DiscoverAuthorities();
 
+        private string ReadConfiguration() => ConfigurationBox.Text.Trim()
+            .Equals(AllAuthoritiesCaption, StringComparison.OrdinalIgnoreCase) ?
+                CaDirectory.AllAuthorities : ConfigurationBox.Text.Trim();
+
+        private static string ConfigurationCaption(string configuration) =>
+            configuration.Equals(CaDirectory.AllAuthorities, StringComparison.OrdinalIgnoreCase) ?
+                AllAuthoritiesCaption : configuration;
+
         private void UpdateAuthorities(IEnumerable<string> discovered)
         {
             // Merge discovered CA names while preserving the currently typed connection target.
             var current = ConfigurationBox.Text;
             configurations = CaDirectory.Configurations(discovered.Concat(configurations));
-            ConfigurationBox.ItemsSource = new[] { CaDirectory.AllAuthorities }.Concat(configurations).ToArray();
-            ConfigurationBox.Text = current;
+            ConfigurationBox.ItemsSource = new[] { AllAuthoritiesCaption }.Concat(configurations).ToArray();
+            ConfigurationBox.Text = ConfigurationCaption(current);
         }
 
         private async Task DiscoverAuthorities(bool showBusy = true)

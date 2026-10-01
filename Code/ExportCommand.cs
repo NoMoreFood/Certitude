@@ -47,6 +47,17 @@ namespace Certitude
         public string Name { get; }
         public Type Type { get; }
         public Func<CertificateRow, object> Read { get; }
+
+        // Map exported values to the native columns needed to compute them.
+        public string[] Columns => Name switch
+        {
+            "Status" => new[] { "Request.Disposition", "NotAfter" },
+            "Disposition" => new[] { "Request.Disposition" },
+            "RevocationReason" => new[] { "Request.RevokedReason" },
+            "TemplateDisplayName" or "TemplateName" or "TemplateOid" => new[] { "CertificateTemplate" },
+            "Configuration" => Array.Empty<string>(), _ => new[] { Name }
+        };
+
         private ExportField(string name, Type type, Func<CertificateRow, object> read)
         { Name = name; Type = type; Read = read; }
 
@@ -324,7 +335,8 @@ namespace Certitude
                 var store = new CertificateStore(config);
                 var watch = Stopwatch.StartNew();
                 var count = store.Export(command.Query(), command.Output, token, null, command.Fields,
-                    row => command.Conditions.All(condition => condition.Matches(row)), command.Force);
+                    row => command.Conditions.All(condition => condition.Matches(row)), command.Force,
+                    command.Conditions.Select(condition => condition.Field.Name).ToArray());
 
                 // Report OID lookup limitations when the chosen fields or filters depend on resolved template names.
                 if (store.LoadedOids?.Warning.Length > 0 &&

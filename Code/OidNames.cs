@@ -295,6 +295,33 @@ namespace Certitude
             var bytes = extension.RawData;
             try
             {
+                // Render dates embedded in certificates and CRLs in the same zone as their other timestamps.
+                if (oid is "2.5.29.16" or "2.5.29.24")
+                {
+                    var position = 0;
+                    var tag = ReadElement(bytes, ref position, bytes.Length, out var end);
+                    string Date(int start, int finish)
+                    {
+                        if (!DateTime.TryParseExact(Encoding.ASCII.GetString(bytes, start, finish - start),
+                            new[] { "yyyyMMddHHmmss'Z'", "yyyyMMddHHmmss.FFFFFFF'Z'" }, CultureInfo.InvariantCulture,
+                            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date))
+                            throw new CryptographicException("Invalid extension date.");
+                        return TimeDisplay.Stamp(date);
+                    }
+                    if (end != bytes.Length) throw new CryptographicException("Invalid date extension.");
+                    if (oid == "2.5.29.24" && tag == 24) return Date(position, end);
+                    if (oid != "2.5.29.16" || tag != 48)
+                        throw new CryptographicException("Invalid date extension.");
+                    var dates = new List<string>();
+                    while (position < end)
+                    {
+                        tag = ReadElement(bytes, ref position, end, out var finish);
+                        if (tag is not (128 or 129)) throw new CryptographicException("Invalid private-key date.");
+                        dates.Add((tag == 128 ? "Not Before: " : "Not After: ") + Date(position, finish));
+                        position = finish;
+                    }
+                    return string.Join(Environment.NewLine, dates);
+                }
                 if (oid == "1.3.6.1.4.1.311.20.2")
                 {
                     // Decode the legacy template name and resolve it against the template catalog.

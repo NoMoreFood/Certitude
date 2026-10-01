@@ -54,19 +54,22 @@ namespace Certitude
                 if (await open.ShowAsync() != true) return;
                 try
                 {
-                    certificate = CertificateValidation.ReadCertificate(open.FileName);
+                    using var cursor = BusyCursor.Enter();
+                    editor.IsEnabled = false;
+                    certificate = await Task.Run(() => CertificateValidation.ReadCertificate(open.FileName));
                     identity.Text = open.FileName;
                     ClearResult();
                 }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
+                finally { editor.IsEnabled = true; }
             });
-            Dialogs.Button(buttons, "_View certificate…", () =>
+            Dialogs.Button(buttons, "_View certificate…", async () =>
             {
                 // Open certificate details using OID resolution allowed by the current network mode.
                 if (certificate == null) { status.Text = "Open a certificate first."; return; }
                 try
                 {
-                    Dialogs.Certificate(this, certificate, oids, offline.IsChecked != true);
+                    await Dialogs.Certificate(this, certificate, oids, offline.IsChecked != true);
                 }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
@@ -118,10 +121,11 @@ namespace Certitude
             var footer = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
             DockPanel.SetDock(footer, Dock.Bottom);
             layout.Children.Add(footer);
-            var controls = new DockPanel { Margin = new Thickness(0, 0, 0, 5) };
+            var controls = new WrapPanel { Margin = new Thickness(0, 0, 0, 1) };
             footer.Children.Add(controls);
-            var actions = Dialogs.RightActions(controls);
-            cancel = Dialogs.Button(actions, "_Cancel", () =>
+            downloaded = new ComboBox { Width = 320, Margin = new Thickness(0, 0, 8, 4) };
+            controls.Children.Add(downloaded);
+            cancel = Dialogs.Button(controls, "_Cancel", () =>
             {
                 // Request cancellation and wait for the current native retrieval to finish.
                 cancellation?.Cancel();
@@ -129,7 +133,7 @@ namespace Certitude
                 status.Text = "Cancelling after the current Windows retrieval finishes…";
             });
             cancel.IsEnabled = false;
-            saveCrl = Dialogs.Button(actions, "_Save CRL…", async () =>
+            saveCrl = Dialogs.Button(controls, "_Save CRL…", async () =>
             {
                 // Save the selected inspected CRL using its original encoded bytes.
                 if (downloaded.SelectedItem is not CrlResult selected) return;
@@ -139,7 +143,7 @@ namespace Certitude
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
             saveCrl.IsEnabled = false;
-            Dialogs.Button(actions, "Save _report…", async () =>
+            Dialogs.Button(controls, "Save _report…", async () =>
             {
                 // Export the visible validation report as text.
                 if (output.Text.Length == 0) return;
@@ -150,8 +154,6 @@ namespace Certitude
             });
 
             // Show inspected CRLs and a read-only diagnostic output area.
-            downloaded = new ComboBox { MinWidth = 120 };
-            controls.Children.Add(downloaded);
             status = new TextBlock { Text = "Ready. Validation does not change the CA.", TextWrapping = TextWrapping.Wrap };
             footer.Children.Add(status);
             output = new TextBox
@@ -196,18 +198,18 @@ namespace Certitude
         {
             // Pair a multiline path input with a file picker for supporting validation files.
             Dialogs.Note(panel, Dialogs.Caption(label));
-            var line = new DockPanel();
+            var line = new WrapPanel();
             panel.Children.Add(line);
-            var actions = Dialogs.RightActions(line);
-            var box = new TextBox { AcceptsReturn = true, MinLines = 2, MaxLines = 2,
+            var box = new TextBox { AcceptsReturn = true, MinLines = 2, MaxLines = 2, Width = 520,
+                Margin = new Thickness(0, 0, 8, 4),
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-            Dialogs.Button(actions, caption, async () =>
+            line.Children.Add(box);
+            Dialogs.Button(line, caption, async () =>
             {
                 // Replace the path list with the selected supporting files.
                 var open = new FilePicker() { Filter = filter, Multiselect = true };
                 if (await open.ShowAsync() == true) box.Text = string.Join(Environment.NewLine, open.FileNames);
             });
-            line.Children.Add(box);
             return box;
         }
 
@@ -255,7 +257,7 @@ namespace Certitude
 
                     // Publish the completed report and enable export of its inspected CRLs.
                     token.ThrowIfCancellationRequested();
-                    output.Text = result.Report;
+                    TimeDisplay.Text(output, () => result.Report.ToString());
                     downloaded.ItemsSource = result.Crls;
                     downloaded.SelectedIndex = result.Crls.Count > 0 ? 0 : -1;
                     saveCrl.IsEnabled = result.Crls.Count > 0;

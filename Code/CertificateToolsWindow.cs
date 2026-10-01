@@ -272,13 +272,17 @@ namespace Certitude
                 new[] { "EKU", "Purposes", "230" }, new[] { "Algorithm", "Algorithm", "100" },
                 new[] { "Key bits", "KeyBits", "80" }, new[] { "Findings", "Findings", "220" },
                 new[] { "Thumbprint", "Thumbprint", "330" } })
-                inventory.Columns.Add(new DataGridTextColumn { Header = Dialogs.Caption(column[0]), Width = int.Parse(column[2]),
-                    Binding = new Binding(column[1]) { StringFormat = column[1] == "NotAfter" ? "yyyy-MM-dd HH:mm" : null } });
+            {
+                var field = new DataGridTextColumn { Header = Dialogs.Caption(column[0]), Width = int.Parse(column[2]),
+                    SortMemberPath = column[1], Binding = column[1] == "NotAfter" ?
+                        TimeDisplay.Binding(column[1], "yyyy-MM-dd HH:mm") : new Binding(column[1]) };
+                if (column[1] == "NotAfter") TimeDisplay.Label(field, DataGridColumn.HeaderProperty, "Expiry (UTC)");
+                inventory.Columns.Add(field);
+            }
 
             // Keep the details preview synchronized with the current inventory selection.
-            inventory.SelectionChanged += (sender, e) =>
-                details.Text = inventory.SelectedItem is InventoryCertificate item ?
-                    CertificateUtilities.Details(item) : "";
+            inventory.SelectionChanged += (sender, e) => TimeDisplay.Text(details, () => inventory.SelectedItem is
+                InventoryCertificate item ? CertificateUtilities.Details(item).ToString() : "");
             inventory.MouseDoubleClick += (sender, e) =>
             {
                 // Open the native viewer only for a double-click on one selected certificate row.
@@ -363,13 +367,16 @@ namespace Certitude
         private StoreLocation Location =>
             location.SelectedIndex == 0 ? StoreLocation.LocalMachine : StoreLocation.CurrentUser;
 
-        private void SourceChanged()
+        private async void SourceChanged()
         {
             // Clear the inventory immediately when the selected store or location changes.
             rows.Clear();
             loadedStore = null;
-            source.Text = "Store selection changed. Load it to browse certificates.";
+            source.Text = "";
             ApplyFilters();
+
+            // Read the selected store automatically once the certificate workspace is visible.
+            if (IsLoaded) await Reload();
         }
 
         private async Task Reload()
@@ -404,13 +411,25 @@ namespace Certitude
                 $"{rows.Count(row => row.NotAfter > now && row.NotAfter <= now.AddDays(30)):N0} expire within 30 days";
         }
 
-        private static byte[] ReadInput(string path)
+        internal static Task<byte[]> ReadInput(string path, CancellationToken token) => Task.Run(() =>
         {
-            // Bound certificate and request file reads before allocating their contents.
-            if (new FileInfo(path).Length > 32 * 1024 * 1024)
+            // Read a bounded snapshot on a worker, checking cancellation between chunks.
+            token.ThrowIfCancellationRequested();
+            using var stream = File.OpenRead(path);
+            if (stream.Length > 32 * 1024 * 1024)
                 throw new ArgumentException("Select a certificate/request file no larger than 32 MB.");
-            return File.ReadAllBytes(path);
-        }
+            var bytes = new byte[(int)stream.Length];
+            var offset = 0;
+            while (offset < bytes.Length)
+            {
+                token.ThrowIfCancellationRequested();
+                var count = stream.Read(bytes, offset, Math.Min(64 * 1024, bytes.Length - offset));
+                if (count == 0) throw new EndOfStreamException("The selected file changed while it was being read.");
+                offset += count;
+            }
+            token.ThrowIfCancellationRequested();
+            return bytes;
+        }, token);
 
         private async Task OpenFile()
         {
@@ -420,10 +439,12 @@ namespace Certitude
             await Run("Opening certificate file…", async token =>
             {
                 // Request a password only when the selected file contains a PFX.
-                var bytes = ReadInput(open.FileName);
+                var bytes = await ReadInput(open.FileName, token);
                 var password = "";
-                if (X509Certificate2.GetCertContentType(CertificateUtilities.DecodePublicPem(bytes)) ==
-                    X509ContentType.Pkcs12)
+                var pfx = await Task.Run(() => X509Certificate2.GetCertContentType(
+                    CertificateUtilities.DecodePublicPem(bytes)) == X509ContentType.Pkcs12, token);
+                token.ThrowIfCancellationRequested();
+                if (pfx)
                 {
                     password = await Password("Open PFX", false);
                     if (password == null) return;
@@ -448,10 +469,11 @@ namespace Certitude
             await Run("Reading import file…", async token =>
             {
                 // Decode the bundle in memory before any certificates or keys are installed.
-                var bytes = ReadInput(open.FileName);
+                var bytes = await ReadInput(open.FileName, token);
                 var password = "";
-                var pfx = X509Certificate2.GetCertContentType(CertificateUtilities.DecodePublicPem(bytes)) ==
-                    X509ContentType.Pkcs12;
+                var pfx = await Task.Run(() => X509Certificate2.GetCertContentType(
+                    CertificateUtilities.DecodePublicPem(bytes)) == X509ContentType.Pkcs12, token);
+                token.ThrowIfCancellationRequested();
                 if (pfx) { password = await Password("Import PFX", false); if (password == null) return; }
                 var preview = await Task.Run(() => CertificateUtilities.ReadFile(bytes, password, token, oids), token);
 
@@ -502,12 +524,12 @@ namespace Certitude
             return (InventoryCertificate)inventory.SelectedItem;
         }
 
-        private void ViewCertificate()
+        private async void ViewCertificate()
         {
             // Open decoded details for the selected inventory certificate.
             try
             {
-                Dialogs.Certificate(this, Selected().Encoded, oids);
+                await Dialogs.Certificate(this, Selected().Encoded, oids);
             }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
         }
@@ -587,10 +609,11 @@ namespace Certitude
                 // Offer a different destination store and an explicit copy or move mode.
                 panel.Children.Add(Glyphs.Label("Destination Store (My = Personal)"));
                 var destination = new ComboBox { ItemsSource = CertificateUtilities.StoreNames.Where(name =>
-                    !string.Equals(name, loadedStore, StringComparison.OrdinalIgnoreCase)).ToArray(), SelectedIndex = 0 };
+                    !string.Equals(name, loadedStore, StringComparison.OrdinalIgnoreCase)).ToArray(),
+                    SelectedIndex = 0, Width = 240, HorizontalAlignment = HorizontalAlignment.Left };
                 panel.Children.Add(destination);
                 var mode = new ComboBox { ItemsSource = new[] { "Copy", "Move" }, SelectedIndex = 0,
-                    Margin = new Thickness(0, 6, 0, 6) };
+                    Width = 120, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 6) };
                 panel.Children.Add(mode);
 
                 // Review selected certificate identities before starting the transfer.
@@ -789,7 +812,8 @@ namespace Certitude
             // Run the TLS probe asynchronously and summarize validation and fingerprint matching.
             tlsResult = await Task.Run(() => CertificateUtilities.Probe(host, targetPort, name,
                 revocation, seconds, hash, token, oids), token);
-            tlsOutput.Text = tlsResult.Report;
+            var report = tlsResult.Report;
+            TimeDisplay.Text(tlsOutput, () => report.ToString());
             status.Text = tlsResult.HandshakeCompleted ?
                 (tlsResult.ExpectedCertificateMatches == false ? "TLS passed; expected certificate MISMATCH." :
                     "TLS validation passed." + (revocation ? "" : " Revocation was not checked.")) :
@@ -838,7 +862,7 @@ namespace Certitude
                 "Renewing a certificate does not automatically update service bindings.");
 
             // Collect subject, alternative names, and the requested key algorithm.
-            subject = Dialogs.Field(form, "X.500 subject", "CN=server.example.com");
+            subject = Dialogs.Field(form, "X.500 subject", "CN=server.example.com", width: 640);
             var names = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
             form.Children.Add(names);
             dns = new TextBox { Width = 280, Height = 50, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
@@ -870,8 +894,8 @@ namespace Certitude
             Dialogs.Button(generate, "_Create CSR…", async () => await CreateCsr());
 
             // Collect the target CA and an existing request file for submission.
-            configuration = Dialogs.Field(form, "Certificate authority · SERVER\\CA name", config);
-            requestPath = Dialogs.Field(form, "PKCS #10 request file");
+            configuration = Dialogs.Field(form, "Certificate authority · SERVER\\CA name", config, width: 440);
+            requestPath = Dialogs.Field(form, "PKCS #10 request file", width: 640);
             var submit = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
             form.Children.Add(submit);
             Dialogs.Button(submit, "_Browse request…", async () =>
@@ -950,7 +974,7 @@ namespace Certitude
                 throw new ArgumentException("Enter a positive request ID.");
 
             // Confirm new submissions with their selected template before contacting the CA.
-            var bytes = retrieve ? null : ReadInput(requestPath.Text);
+            var bytes = retrieve ? null : await ReadInput(requestPath.Text, token);
             var templateName = template.Text.Trim();
             if (!retrieve && !await Confirm("Submit request to AD CS", "CA: " + config + "\r\nRequest: " + requestPath.Text +
                 "\r\nTemplate: " + (templateName.Length == 0 ? "From request / CA policy" : templateName))) return;

@@ -77,8 +77,9 @@ namespace Certitude
             DockPanel.SetDock(footer, Dock.Bottom);
             layout.Children.Add(footer);
             footer.Children.Add(status);
-            var note = new TextBlock { Text = "Read-Only Snapshot · CA Data May Change During Collection · Dates Are UTC",
+            var note = new TextBlock { Text = "Read-Only Snapshot · CA Data May Change During Collection · Time Zone: UTC",
                 FontSize = 10, TextWrapping = TextWrapping.Wrap };
+            TimeDisplay.Label(note, TextBlock.TextProperty, note.Text);
             note.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
             footer.Children.Add(note);
             layout.Children.Add(tabs);
@@ -101,6 +102,12 @@ namespace Certitude
             requests = Details();
             types = Counts("Request Format");
             months = Counts("Submission Month (UTC)");
+            TimeDisplay.Label(months.Columns[0], DataGridColumn.HeaderProperty, "Submission Month (UTC)");
+            TimeChanged += previousUtc =>
+            {
+                foreach (var grid in grids) grid.Items.Refresh();
+                if (Snapshot != null) months.ItemsSource = Snapshot.Months;
+            };
             Tab("Requests", Pair(requests, Pair(types, months, true)), "Submission activity includes imported records. " +
                 "Processing time uses resolved minus submitted timestamps where both are present and ordered. " +
                 "Imported records and manual approvals affect this average.");
@@ -155,10 +162,11 @@ namespace Certitude
                 try
                 {
                     await Task.WhenAll(LoadRecords(cancellation.Token), LoadServer(cancellation.Token));
-                    status.Text = Snapshot == null ? "Record Statistics Unavailable — " + recordsError :
+                    TimeDisplay.Text(status, () => Snapshot == null ?
+                        "Record Statistics Unavailable — " + recordsError :
                         $"{Snapshot.Total:N0} Records · {Snapshot.TemplateCount:N0} Template Groups · " +
                         $"{Snapshot.RequesterCount:N0} Requester Groups · Scan {Snapshot.Elapsed.TotalSeconds:N2}s · " +
-                        "As Of " + CaServerStatistics.Date(Snapshot.AsOf) + " · " + store.SearchStatus;
+                        "As Of " + CaServerStatistics.Date(Snapshot.AsOf) + " · " + store.SearchStatus);
                 }
                 catch (OperationCanceledException)
                 {
@@ -223,10 +231,10 @@ namespace Certitude
                     $"{value.FirstId:N0} – {value.LastId:N0}" : "No Records");
                 Add("Submitted Within 24 Hours / 7 Days / 30 Days",
                     string.Join(" / ", value.Recent.Select(count => count.ToString("N0"))));
-                Add("First Submission", CaServerStatistics.Date(value.FirstSubmission));
-                Add("Latest Submission", CaServerStatistics.Date(value.LastSubmission));
+                Add("First Submission", value.FirstSubmission);
+                Add("Latest Submission", value.LastSubmission);
                 Add("Submission Date Not Recorded", value.MissingSubmission.ToString("N0"));
-                Add("Oldest Pending Submission", CaServerStatistics.Date(value.OldestPending));
+                Add("Oldest Pending Submission", value.OldestPending);
 
                 // Add resolution timing, certificate lifetime, and revocation-reason totals.
                 Add("Average / Longest Resolution", value.TimedResolutions == 0 ? "Not Recorded" :

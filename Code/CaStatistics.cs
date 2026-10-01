@@ -63,7 +63,9 @@ namespace Certitude
         public Dictionary<int, long> Dispositions { get; } = new Dictionary<int, long>();
         public StatisticsGroup[] Templates { get; private set; }
         public StatisticsGroup[] Requesters { get; private set; }
-        public StatisticsGroup[] Months { get; private set; }
+        private StatisticsGroup[] utcMonths;
+        private StatisticsGroup[] localMonths;
+        public StatisticsGroup[] Months => TimeDisplay.Current.UseUtc ? utcMonths : localMonths;
         public StatisticsGroup[] Types { get; private set; }
         public StatisticsGroup[] Reasons { get; private set; }
         public long Count(int disposition) => Dispositions.TryGetValue(disposition, out var value) ? value : 0;
@@ -82,6 +84,7 @@ namespace Certitude
             var templates = new Dictionary<string, StatisticsGroup>(StringComparer.OrdinalIgnoreCase);
             var requesters = new Dictionary<string, StatisticsGroup>(StringComparer.OrdinalIgnoreCase);
             var months = new Dictionary<string, StatisticsGroup>();
+            var localMonths = new Dictionary<string, StatisticsGroup>();
             var types = new Dictionary<string, StatisticsGroup>();
             var reasons = new Dictionary<string, StatisticsGroup>();
             foreach (var record in records)
@@ -142,6 +145,8 @@ namespace Certitude
                     if (row.Disposition == 9 && (!result.OldestPending.HasValue || submitted < result.OldestPending))
                         result.OldestPending = submitted;
                     Add(months, submitted.ToString("yyyy-MM", CultureInfo.InvariantCulture), row, now);
+                    Add(localMonths, TimeDisplay.Display(submitted, false).ToString("yyyy-MM",
+                        CultureInfo.InvariantCulture), row, now);
 
                     // Measure resolution time only for completed requests with consistent timestamps.
                     if (row.Disposition is not (8 or 9) && record.Resolved >= submitted)
@@ -162,8 +167,9 @@ namespace Certitude
             result.Requesters = Ranked(requesters, result.Total, 100);
             result.Types = Ranked(types, result.Total);
             result.Reasons = Ranked(reasons, result.Count(21));
-            result.Months = months.Values.OrderByDescending(group => group.Name).ToArray();
-            foreach (var month in result.Months)
+            result.utcMonths = months.Values.OrderByDescending(group => group.Name).ToArray();
+            result.localMonths = localMonths.Values.OrderByDescending(group => group.Name).ToArray();
+            foreach (var month in result.utcMonths.Concat(result.localMonths))
                 month.Percent = result.Total == 0 ? 0 : 100.0 * month.Count / result.Total;
 
             // Finish only an uncancelled snapshot and record how long the scan took.
@@ -330,7 +336,7 @@ namespace Certitude
                         var value = admin.GetCAProperty(config, id, 0, type, 1);
                         if (id == 10) value = CaTypeName(Convert.ToInt32(value));
                         Add(result.Authority, Dialogs.Caption(admin.GetCAPropertyDisplayName(config, id)),
-                            CertificateStore.Format(value));
+                            value);
                     });
                 }
                 // Collect publication status and the available base and delta CRL metadata.
@@ -369,9 +375,9 @@ namespace Certitude
                     Add(result.Authority, "Signing Certificate Issuer", certificate.Issuer);
                     Add(result.Authority, "Signing Certificate Thumbprint", certificate.Thumbprint);
                     Add(result.Authority, "Signing Certificate Valid From (UTC)",
-                        Date(certificate.NotBefore.ToUniversalTime()));
+                        certificate.NotBefore.ToUniversalTime());
                     Add(result.Authority, "Signing Certificate Expires (UTC)",
-                        Date(certificate.NotAfter.ToUniversalTime()));
+                        certificate.NotAfter.ToUniversalTime());
                     Add(result.Authority, "Signing Certificate Key",
                         described.Algorithm + " / " + described.KeyBits + " Bits");
                     Add(result.Authority, "Signing Certificate Size", Size(certificate.RawData.Length));
@@ -392,7 +398,7 @@ namespace Certitude
                     Add(result.Server, "Operating System", item["Caption"] + " / " + item["Version"] +
                         " / " + item["OSArchitecture"]);
                     var boot = ManagementDateTimeConverter.ToDateTime(Convert.ToString(item["LastBootUpTime"]));
-                    Add(result.Server, "Last Boot (UTC)", Date(boot.ToUniversalTime()));
+                    Add(result.Server, "Last Boot (UTC)", boot.ToUniversalTime());
                     Add(result.Server, "Server Uptime", (DateTime.Now - boot).ToString(@"d\d\ hh\h\ mm\m"));
                     Add(result.Server, "Visible / Free Physical Memory", Size(Convert.ToInt64(
                         item["TotalVisibleMemorySize"]) * 1024) + " / " + Size(Convert.ToInt64(
@@ -419,8 +425,8 @@ namespace Certitude
                     {
                         // Report the CA process start time and memory use.
                         Add(result.Server, "Service Process ID", pid);
-                        Add(result.Server, "Service Started (UTC)", Date(ManagementDateTimeConverter.ToDateTime(
-                            Convert.ToString(process["CreationDate"])).ToUniversalTime()));
+                        Add(result.Server, "Service Started (UTC)", ManagementDateTimeConverter.ToDateTime(
+                            Convert.ToString(process["CreationDate"])).ToUniversalTime());
                         Add(result.Server, "Service Working Set / Private Bytes", Size(Convert.ToInt64(
                             process["WorkingSetSize"])) + " / " + Size(Convert.ToInt64(process["PrivatePageCount"])));
                     });
@@ -578,9 +584,10 @@ namespace Certitude
         }
 
         internal static void Add(List<DetailValue> values, string name, object value) =>
-            values.Add(new DetailValue { Name = name, Value = Convert.ToString(value, CultureInfo.CurrentCulture) });
+            values.Add(new DetailValue { Name = name, Value = value == null ? "Not Recorded" : CertificateStore.Format(value),
+                Time = value is DateTime date ? TimeDisplay.Utc(date) : (DateTime?)null, Report = value as TimeReport });
 
-        internal static string Date(DateTime? date) => date?.ToString("yyyy-MM-dd HH:mm:ss 'UTC'") ?? "Not Recorded";
+        internal static string Date(DateTime? date) => TimeDisplay.Stamp(date);
         internal static string Size(long bytes) => bytes >= 1073741824 ?
             $"{bytes / 1073741824.0:N2} GiB ({bytes:N0} Bytes)" :
             bytes >= 1048576 ? $"{bytes / 1048576.0:N2} MiB ({bytes:N0} Bytes)" : $"{bytes:N0} Bytes";

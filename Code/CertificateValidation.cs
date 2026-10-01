@@ -10,6 +10,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -22,20 +23,25 @@ namespace Certitude
     {
         public string Source { get; set; }
         public byte[] Encoded { get; set; }
-        public string Details { get; set; }
+        public TimeReport Details { get; set; }
         public bool? SignatureValid { get; set; }
         public bool ScopeMatches { get; set; }
         public bool IssuerMatches { get; set; }
         public bool Current { get; set; }
         public bool Listed { get; set; }
         public bool IsDelta { get; set; }
+        public string Issuer { get; set; }
+        public DateTime? ThisUpdate { get; set; }
+        public DateTime? NextUpdate { get; set; }
+        public int EntryCount { get; set; }
+        public string Number { get; set; }
         public override string ToString() => (IsDelta ? "Delta · " : "Base · ") + Source;
     }
 
     internal sealed class ValidationResult
     {
         public string Summary { get; set; }
-        public string Report { get; set; }
+        public TimeReport Report { get; set; }
         public string Revocation { get; set; }
         public X509ChainStatusFlags ChainErrors { get; set; }
         public List<CrlResult> Crls { get; } = new List<CrlResult>();
@@ -132,12 +138,12 @@ namespace Certitude
                         token.ThrowIfCancellationRequested();
                         result.ChainErrors = chain.ChainStatus.Aggregate(X509ChainStatusFlags.NoError,
                             (flags, status) => flags | status.Status);
-                        var text = new StringBuilder();
+                        var text = new TimeReport();
                         text.AppendLine("Certificate: " + certificate.Subject);
                         text.AppendLine("Issuer: " + certificate.Issuer);
                         text.AppendLine("Serial: " + certificate.SerialNumber);
                         text.AppendLine("SHA-256: " + Hash(certificate.RawData));
-                        text.AppendLine("Checked (UTC): " + DateTime.UtcNow.ToString("u"));
+                        text.Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine();
                         text.AppendLine("OID Resolution: " + names.Status);
                         text.AppendLine("Mode: " + (offline ? "Offline / local files and Windows cache" : "Online"));
                         text.AppendLine("Revocation scope: " +
@@ -214,7 +220,7 @@ namespace Certitude
                         text.AppendLine("CRL entry checks describe individual lists. Windows determines " +
                             "the combined base/delta revocation result and chain trust.");
                         text.AppendLine("No entry in one CRL alone does not establish validity.");
-                        result.Report = result.Summary + "\r\n\r\n" + text;
+                        result.Report = new TimeReport(result.Summary + "\r\n\r\n").Append(text);
                     }
                     return result;
                 }
@@ -310,19 +316,38 @@ namespace Certitude
             {
                 if (crl.IsInvalid) throw NativeError();
                 var context = Read<EncodedContext>(crl.DangerousGetHandle());
+                if (context.Size != bytes.Length) throw new CryptographicException("Select a single encoded CRL.");
                 var info = Read<CrlInfo>(context.Info);
                 var extensions = Extensions(info.ExtensionCount, info.Extensions).ToArray();
                 var issuer = new X500DistinguishedName(Bytes(info.Issuer));
-                var result = new CrlResult { Source = source, Encoded = bytes, IsDelta = extensions.Any(e => e.Oid.Value == "2.5.29.27") };
+                var number = extensions.FirstOrDefault(extension => extension.Oid.Value == "2.5.29.20");
+                var numberText = "";
+                if (number != null)
+                {
+                    // Render the nonnegative CRL number itself rather than Windows' localized field label.
+                    var data = number.RawData;
+                    if (data.Length < 3 || data[0] != 2 || data[1] >= 128 || data[1] != data.Length - 2 ||
+                        (data[2] & 128) != 0) throw new CryptographicException("Invalid CRL number.");
+                    numberText = new BigInteger(data.Skip(2).Reverse().Concat(new byte[1]).ToArray())
+                        .ToString(CultureInfo.InvariantCulture);
+                }
+                var result = new CrlResult
+                {
+                    Source = source, Encoded = bytes, IsDelta = extensions.Any(e => e.Oid.Value == "2.5.29.27"),
+                    Issuer = issuer.Name, EntryCount = info.EntryCount,
+                    ThisUpdate = info.ThisUpdate == 0 ? null : DateTime.FromFileTimeUtc(info.ThisUpdate),
+                    NextUpdate = info.NextUpdate == 0 ? null : DateTime.FromFileTimeUtc(info.NextUpdate),
+                    Number = numberText
+                };
 
                 // Report CRL identity, validity window, entry count, and current freshness.
-                var text = new StringBuilder("CRL: " + source + "\r\n");
+                var text = new TimeReport("CRL: " + source + "\r\n");
                 text.AppendLine("  SHA-256: " + Hash(bytes));
                 text.AppendLine("  Issuer: " + issuer.Name);
                 text.AppendLine("  Type: " + (result.IsDelta ? "Delta (requires a compatible base CRL)" : "Base"));
                 text.AppendLine("  Signature algorithm: " + names.Describe(Marshal.PtrToStringAnsi(info.Signature.Oid), 4));
-                text.AppendLine("  This update (UTC): " + DateText(info.ThisUpdate));
-                text.AppendLine("  Next update (UTC): " + DateText(info.NextUpdate));
+                text.Append("  This update: ").AppendTime(result.ThisUpdate).AppendLine();
+                text.Append("  Next update: ").AppendTime(result.NextUpdate).AppendLine();
                 text.AppendLine("  Revoked entries: " + info.EntryCount.ToString("N0", CultureInfo.InvariantCulture));
                 var now = DateTime.UtcNow.ToFileTimeUtc();
                 result.Current = info.ThisUpdate > 0 && info.ThisUpdate <= now && info.NextUpdate > now;
@@ -361,17 +386,18 @@ namespace Certitude
                     {
                         // Show the matching entry revocation date and any entry-specific extensions.
                         var item = Read<CrlEntry>(entry);
-                        text.AppendLine("  Entry revocation date (UTC): " + DateText(item.RevocationDate));
+                        text.Append("  Entry revocation date: ").AppendTime(FileTime(item.RevocationDate)).AppendLine();
                         foreach (var extension in Extensions(item.ExtensionCount, item.Extensions))
-                            text.AppendLine("  Entry " + names.Describe(extension.Oid.Value, 6) + ": " +
-                                names.FormatExtension(extension).Trim());
+                            text.Append("  Entry " + names.Describe(extension.Oid.Value, 6) + ": ")
+                                .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
                     }
                 }
                 // Append decoded CRL extensions to the inspection report.
                 foreach (var extension in extensions)
-                    text.AppendLine("  " + names.Describe(extension.Oid.Value, 6) +
-                        (extension.Critical ? " (Critical)" : "") + ":\r\n" + names.FormatExtension(extension).Trim());
-                result.Details = text.ToString();
+                    text.Append("  " + names.Describe(extension.Oid.Value, 6) +
+                        (extension.Critical ? " (Critical)" : "") + ":\r\n")
+                        .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
+                result.Details = text;
                 return result;
             }
         }
@@ -398,7 +424,7 @@ namespace Certitude
             }
         }
 
-        internal static string CrlMetadata(byte[] bytes)
+        internal static TimeReport CrlMetadata(byte[] bytes)
         {
             // Read compact CRL size and update metadata for server statistics.
             using (var crl = CertCreateCRLContext(1, bytes, bytes.Length))
@@ -406,8 +432,9 @@ namespace Certitude
                 if (crl.IsInvalid) throw NativeError();
                 var context = Read<EncodedContext>(crl.DangerousGetHandle());
                 var info = Read<CrlInfo>(context.Info);
-                return CaServerStatistics.Size(bytes.Length) + $" / {info.EntryCount:N0} Entries\r\n" +
-                    "This Update: " + DateText(info.ThisUpdate) + "\r\nNext Update: " + DateText(info.NextUpdate);
+                return new TimeReport(CaServerStatistics.Size(bytes.Length) + $" / {info.EntryCount:N0} Entries\r\n")
+                    .Append("This Update: ").AppendTime(FileTime(info.ThisUpdate)).AppendLine()
+                    .Append("Next Update: ").AppendTime(FileTime(info.NextUpdate));
             }
         }
 
@@ -463,8 +490,7 @@ namespace Certitude
 
         private static T Read<T>(IntPtr pointer) => Marshal.PtrToStructure<T>(pointer);
         private static Win32Exception NativeError() => new Win32Exception(Marshal.GetLastWin32Error());
-        private static string DateText(long fileTime) =>
-            fileTime == 0 ? "Not specified" : DateTime.FromFileTimeUtc(fileTime).ToString("u");
+        private static DateTime? FileTime(long fileTime) => fileTime == 0 ? null : DateTime.FromFileTimeUtc(fileTime);
 
         private static bool SameName(byte[] first, byte[] second)
         {

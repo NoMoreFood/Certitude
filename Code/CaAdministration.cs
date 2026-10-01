@@ -33,7 +33,8 @@ namespace Certitude
             if ((flags & 3) == 0 || (flags & ~0x13) != 0)
                 throw new ArgumentException("Select base CRLs, delta CRLs, or both.");
             if (nextUpdate.HasValue && ((flags & 0x10) != 0 || nextUpdate.Value <= DateTime.UtcNow))
-                throw new ArgumentException("Use a future UTC next-update time for new CRLs; leave it empty when republishing.");
+                throw new ArgumentException(
+                    "Use a future next-update time for new CRLs; leave it empty when republishing.");
         }
 
         public static string PublishCrls(string config, int flags, DateTime? nextUpdate)
@@ -242,8 +243,7 @@ namespace Certitude
             {
                 1 => text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ?
                     Convert.ToInt32(text.Substring(2), 16) : int.Parse(text, CultureInfo.InvariantCulture),
-                2 => DateTime.Parse(text, CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal),
+                2 => TimeDisplay.Parse(text),
                 3 => Convert.FromBase64String(text), 4 => text, 5 => text.Replace("\r", "").Split('\n'),
                 _ => throw new ArgumentException("Unknown value type.")
             };

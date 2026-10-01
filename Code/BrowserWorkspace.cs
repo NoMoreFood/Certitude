@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Configuration;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -15,6 +16,65 @@ using System.Xml.Serialization;
 
 namespace Certitude
 {
+    internal static class ApplicationLinks
+    {
+        private const string Prefix = "Link:";
+        internal static string ConfigPath => typeof(App).Assembly.Location + ".config";
+
+        private static Configuration Open()
+        {
+            // Read and write only the application settings beside this copy of the executable.
+            var configuration = ConfigurationManager.OpenExeConfiguration(typeof(App).Assembly.Location);
+            if (!string.IsNullOrEmpty(configuration.AppSettings.File) ||
+                !string.IsNullOrEmpty(configuration.AppSettings.SectionInformation.ConfigSource))
+                throw new ConfigurationErrorsException("Keep link settings in " + ConfigPath +
+                    ", without an external appSettings file or configSource.");
+            return configuration;
+        }
+
+        internal static KeyValuePair<string, string>[] Read() => Open().AppSettings.Settings
+            .Cast<KeyValueConfigurationElement>()
+            .Where(setting => setting.Key.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) &&
+                setting.Key.Length > Prefix.Length)
+            .Select(setting => new KeyValuePair<string, string>(setting.Key.Substring(Prefix.Length), setting.Value))
+            .ToArray();
+
+        internal static Uri ResolveTarget(string target)
+        {
+            // Expand portable folder paths without contacting network shares while loading or saving links.
+            target = Environment.ExpandEnvironmentVariables((target ?? "").Trim().Trim('"'));
+            if (string.IsNullOrWhiteSpace(target) || target.Any(char.IsControl))
+                throw new ArgumentException("Enter a website URL or folder path without control characters.");
+            if (Uri.TryCreate(target, UriKind.Absolute, out var uri))
+            {
+                if (uri.IsFile || uri.Scheme is "http" or "https") return uri;
+                throw new ArgumentException("Use an HTTP or HTTPS website URL, or a folder path.");
+            }
+            return new Uri(Path.GetFullPath(Path.Combine(Path.GetDirectoryName(ConfigPath), target)));
+        }
+
+        internal static void Add(string name, string target)
+        {
+            // Validate both fields before acquiring the configuration write lock.
+            name = (name ?? "").Trim();
+            target = (target ?? "").Trim();
+            if (name.Length is < 1 or > 80 || name.Any(char.IsControl))
+                throw new ArgumentException("Use a link name of 1 to 80 characters without control characters.");
+            ResolveTarget(target);
+
+            // Reload under an exclusive file lock so concurrent application instances cannot lose other links.
+            using var writeLock = new FileStream(ConfigPath + ".lock", FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            var configuration = Open();
+            var key = Prefix + name;
+            if (configuration.AppSettings.Settings.AllKeys.Any(value =>
+                value.Equals(key, StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException("A link with that name already exists.");
+            configuration.AppSettings.Settings.Add(key, target);
+            configuration.Save(ConfigurationSaveMode.Modified);
+        }
+    }
+
     public sealed class BrowserColumn
     {
         public string Key { get; set; } = "";
@@ -41,13 +101,13 @@ namespace Certitude
         {
             // Resolve rolling expiry presets at load time without changing explicitly saved dates.
             var filter = Filter ?? throw new InvalidDataException("The saved view has no filters.");
-            var today = utcNow.ToUniversalTime().Date;
+            var now = utcNow.ToUniversalTime();
             return new QuerySpec
             {
                 Disposition = filter.Disposition, Field = filter.Field, Value = filter.Value,
                 Match = filter.Match, PageSize = filter.PageSize,
-                ExpiresFrom = ExpiryDays.HasValue ? (ExpiryDays > 0 ? today : (DateTime?)null) : filter.ExpiresFrom,
-                ExpiresBefore = ExpiryDays.HasValue ? today.AddDays(ExpiryDays.Value) : filter.ExpiresBefore
+                ExpiresFrom = ExpiryDays.HasValue ? (ExpiryDays > 0 ? now : (DateTime?)null) : filter.ExpiresFrom,
+                ExpiresBefore = ExpiryDays.HasValue ? now.AddDays(ExpiryDays.Value) : filter.ExpiresBefore
             };
         }
 
@@ -107,6 +167,7 @@ namespace Certitude
 
     public sealed class BrowserWorkspace
     {
+        public bool UseUtc { get; set; }
         internal static readonly string[] ColumnKeys =
         {
             "RequestId", "Configuration", "CommonName", "Status", "Requester", "Template",

@@ -87,6 +87,8 @@ namespace Certitude
 
         private Task<bool> Confirm(string action, string details) => Dialogs.Confirm(this,
             "Confirm CA Change", action + "\r\nCA: " + config + "\r\n\r\n" + details);
+        private Task<bool> Confirm(string action, Func<string> details) => Dialogs.Confirm(this,
+            "Confirm CA Change", () => action + "\r\nCA: " + config + "\r\n\r\n" + details());
 
         private void Done(string text)
         {
@@ -107,14 +109,16 @@ namespace Certitude
                 var text = await Task.Run(() => CaAdministration.Use(config, admin =>
                 {
                     // Read supported CA properties independently so unavailable values remain visible.
-                    var result = new StringBuilder();
+                    var result = new TimeReport();
                     foreach (var id in new[] { 6, 22, 10, 1, 2, 5, 9, 11, 23, 24, 25, 29, 30, 31 })
                     {
                         try
                         {
                             var type = admin.GetCAPropertyFlags(config, id) & 255;
-                            result.AppendLine(admin.GetCAPropertyDisplayName(config, id) + ": " +
-                                CertificateStore.Format(admin.GetCAProperty(config, id, 0, type, 1)));
+                            var value = admin.GetCAProperty(config, id, 0, type, 1);
+                            result.Append(admin.GetCAPropertyDisplayName(config, id) + ": ");
+                            if (value is DateTime date) result.AppendTime(TimeDisplay.Utc(date)).AppendLine();
+                            else result.AppendLine(CertificateStore.Format(value));
                         }
                         catch (FileNotFoundException) when (id == 9)
                         {
@@ -127,7 +131,7 @@ namespace Certitude
                     }
                     // Append the current identity access mask to the CA information report.
                     result.AppendLine($"Your CA role/access mask: 0x{admin.GetMyRoles(config):X}");
-                    return result.ToString();
+                    return result;
                 }));
                 Dialogs.Report(this, "CA information", text);
                 Done("CA information loaded.");
@@ -140,7 +144,7 @@ namespace Certitude
                     using (var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request"))
                         return Convert.FromBase64String(request.Value.GetCACertificate(0, config, 1));
                 });
-                Dialogs.Certificate(this, bytes, await Task.Run(() => oidNames.Value.Refresh()));
+                await Dialogs.Certificate(this, bytes, await Task.Run(() => oidNames.Value.Refresh()), false);
                 Done("CA certificate loaded.");
             });
             Action(read, "Database _schema…", async () =>
@@ -231,9 +235,11 @@ namespace Certitude
             var panel = Page("C_RLs");
             Dialogs.Note(panel, "Generate new CRLs and publish them to this CA's configured locations. " +
                 "Delta publication requires delta CRLs to be enabled on the CA.");
-            var kind = new ComboBox { ItemsSource = new[] { "Base CRLs", "Delta CRLs", "Base And Delta CRLs" }, SelectedIndex = 0 };
+            var kind = new ComboBox { ItemsSource = new[] { "Base CRLs", "Delta CRLs", "Base And Delta CRLs" },
+                SelectedIndex = 0, Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
             panel.Children.Add(kind);
-            var next = Dialogs.Field(panel, "Next update in UTC (yyyy-MM-dd HH:mm:ss); empty uses CA defaults");
+            var next = Dialogs.Field(panel, "Next update in UTC (yyyy-MM-dd HH:mm:ss); empty uses CA defaults", width: 220);
+            TimeDisplay.Input(this, next);
             var republish = new CheckBox
             {
                 Content = "Republish Existing CRLs Instead Of Generating New Ones",
@@ -252,15 +258,13 @@ namespace Certitude
                 DateTime? date = null;
                 if (next.Text.Trim().Length > 0)
                 {
-                    if (!DateTime.TryParseExact(next.Text.Trim(), "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture,
-                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
-                        throw new ArgumentException("Enter the next-update UTC time as yyyy-MM-dd HH:mm:ss.");
-                    date = parsed;
+                    date = TimeDisplay.Parse(next.Text, format: "yyyy-MM-dd HH:mm:ss");
                 }
                 // Validate and confirm the publication request before making the CA call.
                 CaAdministration.ValidateCrlPublication(flags, date);
                 var action = (flags & 0x10) != 0 ? "Republish existing " : "Generate and publish new ";
-                if (!await Confirm(action + kind.SelectedItem, "Next update: " + (date?.ToString("u") ?? "CA defaults") +
+                if (!await Confirm(action + kind.SelectedItem, () => "Next update: " +
+                    (date.HasValue ? TimeDisplay.Stamp(date) : "CA defaults") +
                     "\r\nApplies to the CA's current and unexpired renewed signing certificates.")) return;
 
                 // Show the publication report so per-location failures remain visible.
@@ -282,9 +286,9 @@ namespace Certitude
             // Select the signing certificate index and CRL type for inspection or export.
             Dialogs.Note(panel, "Inspect or export a CRL for one CA signing certificate. " +
                 "The index selects the signing certificate, including renewed CA certificates.");
-            var index = Dialogs.Field(panel, "CA certificate index", "0");
+            var index = Dialogs.Field(panel, "CA certificate index", "0", width: 90);
             var exportKind = new ComboBox { ItemsSource = new[] { "Base CRL", "Delta CRL" }, SelectedIndex = 0,
-                Margin = new Thickness(0, 6, 0, 0) };
+                Width = 160, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0) };
             panel.Children.Add(exportKind);
             var exports = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
             panel.Children.Add(exports);
@@ -319,12 +323,17 @@ namespace Certitude
             var panel = Page("CA _properties");
             Dialogs.Note(panel, "Read any CA API property by ID and index. Binary values use base64. " +
                 "Writable properties include role separation (23), KRA usage/count (24/25) and KRA certificates (26).");
-            var property = Dialogs.Field(panel, "Property ID", "6");
-            var index = Dialogs.Field(panel, "Property index (zero-based)", "0");
-            var type = new ComboBox { ItemsSource = new[] { "1 · Integer", "2 · UTC Date", "3 · Binary (Base64)", "4 · String" }, SelectedIndex = 3 };
+            var property = Dialogs.Field(panel, "Property ID", "6", width: 90);
+            var index = Dialogs.Field(panel, "Property index (zero-based)", "0", width: 90);
+            var type = new ComboBox
+            {
+                ItemsSource = new[] { "1 · Integer", "2 · Date / Time", "3 · Binary (Base64)", "4 · String" },
+                SelectedIndex = 3, Width = 220, HorizontalAlignment = HorizontalAlignment.Left
+            };
             Dialogs.Note(panel, "Value Type (Detected When Reading)");
             panel.Children.Add(type);
             var value = Dialogs.Field(panel, "Property value", "", true);
+            TimeDisplay.Input(this, value, enabled: () => type.SelectedIndex == 1);
 
             // Provide guarded read and write actions for the property form.
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -340,13 +349,13 @@ namespace Certitude
                     return new
                     {
                         Type = flags & 255, Name = admin.GetCAPropertyDisplayName(config, id),
-                        Value = CertificateStore.Format(admin.GetCAProperty(config, id, number, flags & 255, 1))
+                        Value = admin.GetCAProperty(config, id, number, flags & 255, 1)
                     };
                 }));
 
                 // Reflect the detected type and formatted value in the property editor.
                 type.SelectedIndex = result.Type - 1;
-                value.Text = result.Value;
+                value.Text = CertificateStore.Format(result.Value);
                 Done(result.Name + " loaded.");
             });
             Action(buttons, "_Set property…", async () =>
@@ -382,17 +391,18 @@ namespace Certitude
                 "CDP/AIA publication URLs, policy and exit modules, audit filters and CA flags. " +
                 "Some changes require a service restart.");
             var node = Dialogs.Field(panel, "Node relative to this CA's configuration (empty for the CA root)");
-            var name = Dialogs.Field(panel, "Entry name", "CRLPeriodUnits");
+            var name = Dialogs.Field(panel, "Entry name", "CRLPeriodUnits", width: 320);
             var type = new ComboBox
             {
-                ItemsSource = new[] { "1 · DWORD", "2 · UTC Date", "3 · Binary (Base64)", "4 · String", "5 · Multi-String (One Entry Per Line)" },
-                SelectedIndex = 0
+                ItemsSource = new[] { "1 · DWORD", "2 · Date / Time", "3 · Binary (Base64)", "4 · String", "5 · Multi-String (One Entry Per Line)" },
+                SelectedIndex = 0, Width = 320, HorizontalAlignment = HorizontalAlignment.Left
             };
 
             // Attach the value editor and guarded configuration actions.
             Dialogs.Note(panel, "Value type");
             panel.Children.Add(type);
             var value = Dialogs.Field(panel, "Value", "", true);
+            TimeDisplay.Input(this, value, enabled: () => type.SelectedIndex == 1);
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
             panel.Children.Add(buttons);
             Action(buttons, "_Read entry", async () =>
@@ -434,6 +444,8 @@ namespace Certitude
                 "enterprise CA issues. Edit the template definitions and their permissions in the template console.");
             var names = Dialogs.Field(panel, "Published templates", "", true);
             names.Height = 300;
+            names.Width = 480;
+            names.HorizontalAlignment = HorizontalAlignment.Left;
             var loaded = false;
             string original = null;
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };

@@ -199,8 +199,16 @@ namespace Certitude
 
     public sealed class DetailValue
     {
-        public string Name { get; set; }
-        public string Value { get; set; }
+        private string name;
+        private string value;
+        public string Name { get => name?.Replace("(UTC)", "(" + TimeDisplay.Current.Zone + ")"); set => name = value; }
+        public DateTime? Time { get; set; }
+        internal TimeReport Report { get; set; }
+        public string Value
+        {
+            get => Time.HasValue ? TimeDisplay.Stamp(Time) : Report?.ToString() ?? value;
+            set => this.value = value;
+        }
     }
 
     public sealed class CertificateDetails
@@ -350,7 +358,7 @@ namespace Certitude
         }
 
         public virtual IEnumerable<CertificateRow> ReadRows(QuerySpec query, int? before,
-            CancellationToken token, bool ordered = true)
+            CancellationToken token, bool ordered = true, string[] fields = null)
         {
             // Reject impossible cursor ranges before preparing the matching row streams.
             query.Validate();
@@ -358,24 +366,54 @@ namespace Certitude
             if (query.ExactId.HasValue && before.HasValue && query.ExactId.Value >= before.Value) yield break;
             if (query.Field == "Configuration" && query.Value.Length > 0 && !query.MatchesText(Configuration)) yield break;
 
+            // Check the status index before an ordered query can scan every issued certificate for an empty view.
+            if (query.Disposition is 9 or 30 or 31 &&
+                !HasRows("Request.Disposition", query.Disposition.Value, token)) yield break;
+
             // Load directory names before the query only when template labels participate in filtering.
             var names = query.Value.Length > 0 && (query.Field == "All" || query.Field == "CertificateTemplate") ?
                 Oids : null;
             token.ThrowIfCancellationRequested();
 
+            // Include output and filter dependencies while always retaining IDs for ordering and scan bounds.
+            var resultColumns = Columns;
+            var resolveTemplates = true;
+            if (fields != null)
+            {
+                var selected = fields.Select(ExportField.Find).ToArray();
+                var required = new HashSet<string>(selected.SelectMany(field => field.Columns)) { "RequestID" };
+                if (query.Disposition.HasValue) required.Add("Request.Disposition");
+                if (query.ExpiresFrom.HasValue || query.ExpiresBefore.HasValue) required.Add("NotAfter");
+                if (query.Value.Length > 0 && query.Field != "Configuration")
+                {
+                    if (query.Field == "All") required.UnionWith(new[] { "CommonName", "RequesterName",
+                        "CertificateTemplate", "SerialNumber", "NotAfter", "Request.Disposition" });
+                    else required.Add(query.Field);
+                }
+                resultColumns = Columns.Where(required.Contains).ToArray();
+                resolveTemplates = names != null || selected.Any(field =>
+                    field.Name.StartsWith("Template", StringComparison.Ordinal));
+            }
+
             // Parallelize client-side scans unless the CA name alone already matches every candidate.
             if (query.UsesClientSearch && query.Field != "Configuration" &&
                 (query.Field != "All" || !query.MatchesText(Configuration)))
             {
-                foreach (var row in ReadScanRows(query, before, token, names)) yield return row;
+                foreach (var row in ReadScanRows(query, before, token, names, resultColumns, resolveTemplates))
+                    yield return row;
                 yield break;
             }
 
             // Expand exact template searches to their indexed name and OID representations.
             var restrictions = query.Field == "CertificateTemplate" && query.Match == SearchMatch.Exact &&
                 query.Value.Length > 0 ? names.TemplateRestrictions(query.Value) : new[] { (string)null };
-            var streams = restrictions.Select(value => ReadRowsCore(query, before, token, ordered, names, value)
-                .GetEnumerator()).ToArray();
+
+            // Rule out absent indexed values before opening an ordered requester or template stream.
+            if (ordered && query.Match == SearchMatch.Exact && query.Value.Length > 0 &&
+                query.Field is "RequesterName" or "CertificateTemplate" &&
+                !restrictions.Any(value => HasRows(query.Field, value ?? query.Value, token))) yield break;
+            var streams = restrictions.Select(value => ReadRowsCore(query, before, token, ordered, names,
+                value, resultColumns, resolveTemplates).GetEnumerator()).ToArray();
             try
             {
                 // Stream directly when no merge of ordered template results is necessary.
@@ -406,8 +444,26 @@ namespace Certitude
             finally { foreach (var stream in streams) stream.Dispose(); }
         }
 
+        private bool HasRows(string field, object value, CancellationToken token)
+        {
+            // Select only a request ID and let the CA choose its field index without an ordering constraint.
+            token.ThrowIfCancellationRequested();
+            using var view = ComScope<ICertView>.Create("CertificateAuthority.View");
+            view.Value.OpenConnection(Configuration);
+            view.Value.SetResultColumnCount(1);
+            view.Value.SetResultColumn(view.Value.GetColumnIndex(0, "RequestID"));
+            Restrict(view.Value, field, 1, value);
+
+            // Read one candidate without retrieving certificate metadata or caching an empty result.
+            token.ThrowIfCancellationRequested();
+            using var rows = new ComScope<ICertViewRow>(view.Value.OpenView());
+            var found = rows.Value.Next() >= 0;
+            token.ThrowIfCancellationRequested();
+            return found;
+        }
+
         private IEnumerable<CertificateRow> ReadScanRows(QuerySpec query, int? before,
-            CancellationToken token, OidNames names)
+            CancellationToken token, OidNames names, string[] resultColumns, bool resolveTemplates)
         {
             // Limit one expensive scan per CA so concurrent callers cannot multiply its four readers.
             var gate = scanGates.GetOrAdd(Configuration, _ => new SemaphoreSlim(1, 1));
@@ -418,7 +474,8 @@ namespace Certitude
                 var budget = Math.Max(4096, query.PageSize + 1);
                 var scanned = 0;
                 var cursor = 0;
-                foreach (var row in ReadRowsCore(query, before, token, true, names, null, 1, budget, id =>
+                foreach (var row in ReadRowsCore(query, before, token, true, names, null,
+                    resultColumns, resolveTemplates, 1, budget, id =>
                 {
                     scanned++;
                     cursor = id;
@@ -440,7 +497,8 @@ namespace Certitude
                         {
                             // Each worker owns its COM objects and stops before entering the next range.
                             if (upper <= lower) return;
-                            foreach (var row in ReadRowsCore(query, upper, request.Token, true, names, null, lower))
+                            foreach (var row in ReadRowsCore(query, upper, request.Token, true, names,
+                                null, resultColumns, resolveTemplates, lower))
                                 buffers[partition].Add(row, request.Token);
                         }
                         catch (OperationCanceledException) when (request.IsCancellationRequested) { }
@@ -471,7 +529,8 @@ namespace Certitude
         }
 
         private IEnumerable<CertificateRow> ReadRowsCore(QuerySpec query, int? before, CancellationToken token,
-            bool ordered, OidNames names, string templateRestriction, int minimumId = 1,
+            bool ordered, OidNames names, string templateRestriction, string[] resultColumns,
+            bool resolveTemplates, int minimumId = 1,
             int maximumRows = int.MaxValue, Action<int> scanned = null)
         {
             // Open a narrow metadata view to avoid fetching certificate blobs while browsing.
@@ -480,8 +539,8 @@ namespace Certitude
             {
                 var view = scope.Value;
                 view.OpenConnection(Configuration);
-                view.SetResultColumnCount(Columns.Length);
-                foreach (var name in Columns) view.SetResultColumn(view.GetColumnIndex(0, name));
+                view.SetResultColumnCount(resultColumns.Length);
+                foreach (var name in resultColumns) view.SetResultColumn(view.GetColumnIndex(0, name));
 
                 // A sorted column can have only one restriction. The cursor is the sole RequestID bound.
                 if (query.ExactId.HasValue) Restrict(view, "RequestID", 1, query.ExactId.Value);
@@ -570,8 +629,11 @@ namespace Certitude
                         if (rejected || !query.Matches(row)) continue;
 
                         // Resolve display labels only for matching rows when the search does not need them.
-                        names ??= Oids;
-                        row.ResolvedTemplate ??= names.Template(row.Template);
+                        if (resolveTemplates)
+                        {
+                            names ??= Oids;
+                            row.ResolvedTemplate ??= names.Template(row.Template);
+                        }
                         token.ThrowIfCancellationRequested();
                         yield return row;
                     }
@@ -589,6 +651,27 @@ namespace Certitude
 
         private static string NormalizeColumn(string name) => name.StartsWith("Request.",
             StringComparison.OrdinalIgnoreCase) ? name.Substring(8) : name;
+
+        public virtual byte[] ReadCertificate(int requestId, CancellationToken token)
+        {
+            // Retrieve only the certificate blob when viewing or exporting an individual certificate.
+            token.ThrowIfCancellationRequested();
+            using var view = ComScope<ICertView>.Create("CertificateAuthority.View");
+            view.Value.OpenConnection(Configuration);
+            view.Value.SetResultColumnCount(1);
+            view.Value.SetResultColumn(view.Value.GetColumnIndex(0, "RawCertificate"));
+            Restrict(view.Value, "RequestID", 1, requestId);
+
+            // Distinguish a deleted request from an existing request without an issued certificate.
+            token.ThrowIfCancellationRequested();
+            using var rows = new ComScope<ICertViewRow>(view.Value.OpenView());
+            if (rows.Value.Next() < 0) throw new InvalidOperationException("This request no longer exists.");
+            token.ThrowIfCancellationRequested();
+            using var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn());
+            var value = columns.Value.Next() < 0 ? null : columns.Value.GetValue(1);
+            token.ThrowIfCancellationRequested();
+            return value is string encoded && encoded.Length > 0 ? Convert.FromBase64String(encoded) : null;
+        }
 
         public virtual CertificateDetails ReadDetails(int requestId, CancellationToken token)
         {
@@ -628,7 +711,8 @@ namespace Certitude
                             var value = columns.Value.GetValue(1);
                             if (name == "RawCertificate" && value is string encoded && encoded.Length > 0)
                                 details.Certificate = Convert.FromBase64String(encoded);
-                            details.Values.Add(new DetailValue { Name = name, Value = Format(value) });
+                            details.Values.Add(new DetailValue { Name = name, Value = Format(value),
+                                Time = value is DateTime date ? TimeDisplay.Utc(date) : (DateTime?)null });
                             if (NormalizeColumn(name) == "CertificateTemplate")
                                 details.Values.Add(new DetailValue { Name = "Resolved Certificate Template",
                                     Value = names.Template(Format(value)).Label });
@@ -663,7 +747,8 @@ namespace Certitude
                             {
                                 var extension = new System.Security.Cryptography.X509Certificates.X509Extension(
                                     oid, Convert.FromBase64String(encoded), (flags & 1) != 0);
-                                details.Values.Add(new DetailValue { Name = name, Value = names.FormatExtension(extension) });
+                                details.Values.Add(new DetailValue { Name = name,
+                                    Report = new TimeReport().Append(() => names.FormatExtension(extension)) });
                             }
                             catch (FormatException) { }
                         }
@@ -679,11 +764,18 @@ namespace Certitude
         }
 
         public long Export(QuerySpec query, string path, CancellationToken token, Action<long> progress,
-            string[] fields = null, Func<CertificateRow, bool> matches = null, bool overwrite = true)
+            string[] fields = null, Func<CertificateRow, bool> matches = null, bool overwrite = true,
+            string[] conditionFields = null)
         {
             // Choose export columns and reject accidental replacement of an existing file.
+            var utc = TimeDisplay.Current.UseUtc;
+            var zone = utc ? "UTC" : "Local";
             var selected = ExportField.Select(fields ?? (IsAllAuthorities ?
                 new[] { "Configuration" }.Concat(ExportField.Defaults).ToArray() : null));
+
+            // Keep full rows for opaque predicates; otherwise include only output and known filter dependencies.
+            var required = matches != null && conditionFields == null ? null :
+                selected.Select(field => field.Name).Concat(conditionFields ?? Array.Empty<string>()).ToArray();
             if (!overwrite && File.Exists(path))
                 throw new IOException("The output file already exists. Use --force to replace it.");
 
@@ -697,21 +789,22 @@ namespace Certitude
                     // Write the appropriate headers for GUI defaults or explicitly selected fields.
                     writer.WriteLine(fields == null ? (IsAllAuthorities ? "Certificate authority," : "") +
                         "Request ID,Common name,Requester,Template,Serial number," +
-                        "Valid from (UTC),Expires (UTC),Status" :
+                        $"Valid from ({zone}),Expires ({zone}),Status" :
                         string.Join(",", selected.Select(field => Csv(field.Name))));
 
                     // Stream matching records with the most selective available query order.
                     var ordered = fields == null || query.Match != SearchMatch.Exact || query.Value.Length == 0 ||
                         query.Field != "CommonName" && query.Field != "SerialNumber";
-                    foreach (var row in ReadRows(query, null, token, ordered))
+                    foreach (var row in ReadRows(query, null, token, ordered, required))
                     {
                         // Apply remaining export conditions and serialize only the requested fields.
                         if (matches != null && !matches(row)) continue;
                         writer.WriteLine(string.Join(",", selected.Select(field =>
                         {
                             var value = field.Read(row);
-                            return Csv(fields != null && value is DateTime date ?
-                                date.ToString("o", CultureInfo.InvariantCulture) : Format(value));
+                            if (value is not DateTime date) return Csv(Format(value));
+                            return Csv(fields != null ? date.ToString("o", CultureInfo.InvariantCulture) :
+                                TimeDisplay.Stamp(date, utc));
                         })));
                         if (++count % 1000 == 0) progress?.Invoke(count);
                     }
@@ -738,7 +831,8 @@ namespace Certitude
         public static string Format(object value)
         {
             // Render native values consistently for details and CSV output.
-            if (value is DateTime date) return date.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            if (value is DateTime date) return TimeDisplay.Format(date,
+                TimeDisplay.Current.UseUtc ? "yyyy-MM-dd HH:mm:ss" : "yyyy-MM-dd HH:mm:ss zzz");
             if (value is byte[] bytes) return Convert.ToBase64String(bytes);
             if (value is string[] lines) return string.Join(Environment.NewLine, lines);
             return Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
@@ -790,6 +884,9 @@ namespace Certitude
         public override CertificateDetails ReadDetails(int requestId, CancellationToken token) =>
             throw new InvalidOperationException("Select a record and its certificate authority to load details.");
 
+        public override byte[] ReadCertificate(int requestId, CancellationToken token) =>
+            throw new InvalidOperationException("Select a record and its certificate authority to load a certificate.");
+
         internal override CertificatePage ReadBrowserPage(QuerySpec query, CertificateRow before,
             CancellationToken token)
         {
@@ -834,7 +931,7 @@ namespace Certitude
         }
 
         public override IEnumerable<CertificateRow> ReadRows(QuerySpec query, int? before,
-            CancellationToken token, bool ordered = true)
+            CancellationToken token, bool ordered = true, string[] fields = null)
         {
             // Start a cancellable query using only CAs still available in this selection.
             query.Validate();
@@ -856,7 +953,7 @@ namespace Certitude
                     try
                     {
                         // Feed records into bounded queues while retaining their originating CA.
-                        foreach (var row in source.ReadRows(query, before, request.Token, ordered))
+                        foreach (var row in source.ReadRows(query, before, request.Token, ordered, fields))
                         {
                             row.Configuration = source.Configuration;
                             readAny = true;

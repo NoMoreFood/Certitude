@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.DirectoryServices.Protocols;
 using System.Globalization;
 using System.Linq;
@@ -24,7 +25,9 @@ namespace Certitude
         public string ObjectClass { get; }
         public string Effect { get; }
         public bool FixedObject => Id == "NTAuthCA";
-        public bool ExistingOnly => Id == "Enrollment";
+        public bool IsCrl => ObjectClass == "cRLDistributionPoint";
+        public string ItemName => IsCrl ? "CRL" : "Certificate";
+        public bool ExistingOnly => Id == "Enrollment" || IsCrl;
         public bool RequiredValue => !ExistingOnly && Id != "CrossCA";
         public override string ToString() => Name;
 
@@ -42,22 +45,35 @@ namespace Certitude
         public Guid Id { get; set; }
         public string Name { get; set; }
         public string DistinguishedName { get; set; }
+        public bool IsAuthority { get; set; }
     }
 
-    internal sealed class PublishedCertificate
+    internal sealed class PublishedArtifact
     {
         public PublishedStore Store { get; set; }
         public PublishedObject Object { get; set; }
         public byte[] Value { get; set; }
         public int Direction { get; set; } = -1;
         public InventoryCertificate Certificate { get; set; }
+        public CrlResult Crl { get; set; }
         public string Error { get; set; } = "";
         public string Fingerprint { get; set; }
-        public string Subject => Certificate?.Subject ?? "Unreadable Certificate Value";
-        public string Issuer => Certificate?.Issuer ?? "";
+        public string Subject => Certificate?.Subject ?? Crl?.Issuer ?? "Unreadable " + Store.ItemName + " Value";
+        public string Issuer => Certificate?.Issuer ?? Crl?.Issuer ?? "";
         public string Thumbprint => Certificate?.Thumbprint ?? Fingerprint;
-        public DateTime? Expires => Certificate?.NotAfter;
-        public string Status => Certificate?.Validity ?? "Unreadable";
+        public DateTime? Expires => Certificate?.NotAfter ?? Crl?.NextUpdate;
+        public DateTime? Updated => Crl?.ThisUpdate;
+        public int? Entries => Crl?.EntryCount;
+        public string Number => Crl?.Number ?? "";
+        public string Status => Certificate?.Validity ?? (Crl == null ? "Unreadable" :
+            Crl.ThisUpdate == null ? "No This Update" : Crl.ThisUpdate > DateTime.UtcNow ? "Not Yet Valid" :
+            Crl.NextUpdate == null ? "No Next Update" :
+            Crl.NextUpdate <= DateTime.UtcNow ? "Expired" : "Current (Time Only)");
+        public bool Readable => Certificate != null || Crl != null;
+        public byte[] Encoded => Certificate?.Encoded ?? Crl?.Encoded ?? Value;
+        public string Details => Certificate != null ? CertificateUtilities.Details(Certificate) :
+            Crl != null ? Crl.Details + "\r\nSignature And Certificate Revocation Status Not Checked In This View." :
+            Error + "\r\nValue SHA-256: " + Fingerprint;
         public string PairSide => Direction switch { 0 => "Forward", 1 => "Reverse", _ => "" };
         public string Key => Object.Id + "/" + Fingerprint + "/" + Direction;
     }
@@ -65,7 +81,7 @@ namespace Certitude
     internal sealed class PublishedSnapshot
     {
         public List<PublishedObject> Objects { get; } = new List<PublishedObject>();
-        public List<PublishedCertificate> Certificates { get; } = new List<PublishedCertificate>();
+        public List<PublishedArtifact> Artifacts { get; } = new List<PublishedArtifact>();
         public string OidStatus { get; set; } = "";
     }
 
@@ -73,12 +89,12 @@ namespace Certitude
     {
         public PublishedStore Store { get; set; }
         public PublishedObject Object { get; set; }
-        public InventoryCertificate Certificate { get; set; }
+        public PublishedArtifact Artifact { get; set; }
         public string Server { get; set; }
         public string Review => "Domain Controller: " + Server + "\r\nStore: " + Store.Name +
             "\r\nDirectory Object: " + Object.DistinguishedName + "\r\n" +
             (Object.Id == Guid.Empty ? "Create A New Publication Object" : "Add To The Existing Publication Object") +
-            "\r\n\r\n" + Store.Effect + "\r\n\r\n" + CertificateUtilities.Details(Certificate);
+            "\r\n\r\n" + Store.Effect + "\r\n\r\n" + Artifact.Details;
     }
 
     internal sealed class PublishedDirectory
@@ -98,7 +114,13 @@ namespace Certitude
                 "Changes published key recovery agent certificates. Configure CA key recovery separately."),
             new PublishedStore("Enrollment", "Enrollment Services", "Enrollment Services", "cACertificate",
                 "pKIEnrollmentService", "Changes the certificates advertised by an existing enrollment service. " +
-                "CA configuration and published templates stay unchanged.")
+                "CA configuration and published templates stay unchanged."),
+            new PublishedStore("BaseCRL", "Base CRLs", "", "certificateRevocationList", "cRLDistributionPoint",
+                "Changes base revocation lists available to clients through this AD publication location."),
+            new PublishedStore("DeltaCRL", "Delta CRLs", "", "deltaRevocationList", "cRLDistributionPoint",
+                "Changes delta revocation lists. Clients also need the matching base CRL."),
+            new PublishedStore("ARL", "Authority Revocation Lists", "", "authorityRevocationList",
+                "cRLDistributionPoint", "Changes revocation lists for CA certificates at this AD publication location.")
         };
         public string Server { get; }
         public string ConfigurationName { get; }
@@ -133,8 +155,23 @@ namespace Certitude
             return connection;
         }
 
-        internal string ParentName(PublishedStore store) => store.FixedObject ? ServicesName :
+        internal string ParentName(PublishedStore store) => store.FixedObject || store.IsCrl ? ServicesName :
             "CN=" + store.Container + "," + ServicesName;
+
+        private string TargetName(PublishedStore store, string name)
+        {
+            // Retain full CRL object paths because separate CA containers can contain identical common names.
+            if (!store.IsCrl) return "CN=" + EscapeName(name) + "," + ParentName(store);
+            if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(
+                "," + ServicesName, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Select an existing CRL publication object in this forest.");
+            return name;
+        }
+
+        private static bool Matches(PublishedStore store, SearchResultEntry entry) =>
+            entry.Attributes["objectClass"].GetValues(typeof(string)).Cast<string>().Any(value =>
+                value.Equals(store.ObjectClass, StringComparison.OrdinalIgnoreCase) ||
+                (store.IsCrl && value.Equals("certificationAuthority", StringComparison.OrdinalIgnoreCase)));
 
         internal static string EscapeName(string value)
         {
@@ -170,12 +207,14 @@ namespace Certitude
         {
             Id = new Guid((byte[])entry.Attributes["objectGUID"][0]),
             Name = (string)entry.Attributes["cn"].GetValues(typeof(string))[0],
-            DistinguishedName = entry.DistinguishedName
+            DistinguishedName = entry.DistinguishedName,
+            IsAuthority = entry.Attributes["objectClass"].GetValues(typeof(string)).Cast<string>()
+                .Contains("certificationAuthority", StringComparer.OrdinalIgnoreCase)
         };
 
         private static byte[][] Values(LdapConnection connection, SearchResultEntry entry, string attribute)
         {
-            // Track object identity across ranged reads of a multivalued certificate attribute.
+            // Track object identity across ranged reads of a multivalued publication attribute.
             var values = new List<byte[]>();
             var id = new Guid((byte[])entry.Attributes["objectGUID"][0]);
             var next = 0;
@@ -190,7 +229,7 @@ namespace Certitude
                 if (name == null)
                 {
                     if (next != 0)
-                        throw new InvalidOperationException("The directory returned an incomplete certificate list.");
+                        throw new InvalidOperationException("The directory returned an incomplete publication list.");
                     return values.ToArray();
                 }
                 // Accumulate values and request the next range until the full attribute is read.
@@ -199,7 +238,7 @@ namespace Certitude
                     return values.ToArray();
                 var end = name.Substring(name.LastIndexOf('-') + 1);
                 if (!int.TryParse(end, NumberStyles.None, CultureInfo.InvariantCulture, out var last) || last < next)
-                    throw new InvalidOperationException("The directory returned an invalid certificate range.");
+                    throw new InvalidOperationException("The directory returned an invalid publication range.");
                 next = checked(last + 1);
                 entry = Entry(connection, entry.DistinguishedName, "objectGUID", attribute + ";range=" + next + "-*");
                 if (entry == null)
@@ -207,27 +246,35 @@ namespace Certitude
             }
         }
 
-        internal static PublishedCertificate[] Describe(PublishedStore store, PublishedObject target, byte[] value,
+        internal static PublishedArtifact[] Describe(PublishedStore store, PublishedObject target, byte[] value,
             OidNames names = null)
         {
             // Ignore the required-attribute placeholder and fingerprint real publication values.
-            if (value.Length == 1 && value[0] == 0) return Array.Empty<PublishedCertificate>();
+            if (value.Length == 1 && value[0] == 0) return Array.Empty<PublishedArtifact>();
             string fingerprint;
             using (var hash = SHA256.Create())
                 fingerprint = BitConverter.ToString(hash.ComputeHash(value)).Replace("-", "");
-            PublishedCertificate Row(byte[] encoded, int direction)
+            PublishedArtifact Row(byte[] encoded, int direction)
             {
-                // Describe a certificate while retaining its source value even if decoding fails.
-                var row = new PublishedCertificate { Store = store, Object = target, Value = value,
+                // Describe an artifact while retaining its source value even if decoding fails.
+                var row = new PublishedArtifact { Store = store, Object = target, Value = value,
                     Direction = direction, Fingerprint = fingerprint };
                 try
                 {
+                    // Use the native CRL decoder for revocation lists while retaining unreadable directory bytes.
+                    if (store.IsCrl)
+                    {
+                        row.Crl = CertificateValidation.InspectCrl(
+                            encoded, target.DistinguishedName, null, null, names);
+                        return row;
+                    }
                     using var certificate = new X509Certificate2(encoded);
                     if (!certificate.RawData.SequenceEqual(encoded))
                         throw new CryptographicException("Invalid certificate data.");
                     row.Certificate = CertificateUtilities.Describe(certificate, names);
                 }
-                catch (CryptographicException error) { row.Error = CaAdministration.Error(error); }
+                catch (Exception error) when (error is CryptographicException or Win32Exception or ArgumentException)
+                { row.Error = CaAdministration.Error(error); }
                 return row;
             }
             // Expand cross-certificate pairs into separate forward and reverse rows.
@@ -240,26 +287,28 @@ namespace Certitude
             catch (ArgumentException error)
             {
                 // Keep malformed pair data visible so it can still be inspected or removed.
-                return new[] { new PublishedCertificate { Store = store, Object = target, Value = value,
+                return new[] { new PublishedArtifact { Store = store, Object = target, Value = value,
                     Fingerprint = fingerprint, Error = error.Message } };
             }
         }
 
         public PublishedSnapshot Read(PublishedStore store)
         {
-            // Prepare a paged search of the selected forest publication store.
+            // Prepare a paged search including nested CDP and CA objects for revocation lists.
             using var connection = Open();
             var names = Names;
             var snapshot = new PublishedSnapshot { OidStatus = names.Status };
-            var filter = "(objectClass=" + store.ObjectClass + ")";
+            var filter = store.IsCrl ? "(|(objectClass=cRLDistributionPoint)(objectClass=certificationAuthority))" :
+                "(objectClass=" + store.ObjectClass + ")";
             if (store.FixedObject) filter = "(&" + filter + "(cn=NTAuthCertificates))";
-            var request = new SearchRequest(ParentName(store), filter, SearchScope.OneLevel,
-                "cn", "objectGUID", store.Attribute + ";range=0-499");
+            var request = new SearchRequest(ParentName(store), filter,
+                store.IsCrl ? SearchScope.Subtree : SearchScope.OneLevel,
+                "cn", "objectGUID", "objectClass", store.Attribute + ";range=0-499");
             var pages = new PageResultRequestControl(500);
             request.Controls.Add(pages);
             do
             {
-                // Read each page, including all ranged certificate values for every object.
+                // Read each page, including all ranged publication values for every object.
                 SearchResponse response;
                 try { response = (SearchResponse)connection.SendRequest(request); }
                 catch (DirectoryOperationException error) when (error.Response?.ResultCode == ResultCode.NoSuchObject)
@@ -269,14 +318,15 @@ namespace Certitude
                     var target = DescribeObject(entry);
                     snapshot.Objects.Add(target);
                     foreach (var value in Values(connection, entry, store.Attribute))
-                        snapshot.Certificates.AddRange(Describe(store, target, value, names));
+                        snapshot.Artifacts.AddRange(Describe(store, target, value, names));
                 }
                 pages.Cookie = response.Controls.OfType<PageResultResponseControl>().Single().Cookie;
             } while (pages.Cookie.Length > 0);
 
-            // Sort the completed snapshot for stable object selection and certificate browsing.
-            snapshot.Objects.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name));
-            snapshot.Certificates.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Subject, b.Subject));
+            // Sort the completed snapshot for stable object selection and artifact browsing.
+            snapshot.Objects.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(
+                store.IsCrl ? a.DistinguishedName : a.Name, store.IsCrl ? b.DistinguishedName : b.Name));
+            snapshot.Artifacts.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Subject, b.Subject));
             return snapshot;
         }
 
@@ -300,22 +350,32 @@ namespace Certitude
             return metadata;
         }
 
+        internal static PublishedArtifact ValidateArtifact(PublishedStore store, byte[] encoded, OidNames names = null)
+        {
+            // Reject malformed inputs and CRLs placed in the wrong base or delta publication attribute.
+            if (!store.IsCrl) return new PublishedArtifact
+                { Store = store, Certificate = ValidateCertificate(store, encoded, names) };
+            var crl = CertificateValidation.InspectCrl(encoded, store.Name, null, null, names);
+            if (crl.IsDelta != (store.Id == "DeltaCRL"))
+                throw new ArgumentException(store.Id == "DeltaCRL" ? "Select a delta CRL." : "Select a base CRL.");
+            return new PublishedArtifact { Store = store, Crl = crl };
+        }
+
         public PublicationPlan Prepare(PublishedStore store, string objectName, byte[] encoded)
         {
-            // Validate the certificate and resolve the intended publication object.
-            var certificate = ValidateCertificate(store, encoded, Names);
+            // Validate the artifact and resolve the intended publication object.
+            var artifact = ValidateArtifact(store, encoded, Names);
             objectName = store.FixedObject ? "NTAuthCertificates" : (objectName ?? "").Trim();
-            var name = "CN=" + EscapeName(objectName) + "," + ParentName(store);
+            var name = TargetName(store, objectName);
             using var connection = Open();
             var entry = Entry(connection, name, "cn", "objectGUID", "objectClass", store.Attribute);
 
             // Check whether the destination can be created or must already have the expected class.
             if (entry == null && store.ExistingOnly)
-                throw new InvalidOperationException("Select an existing enrollment service publication object.");
-            if (entry != null && !entry.Attributes["objectClass"].GetValues(typeof(string)).Cast<string>()
-                .Contains(store.ObjectClass, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Select an existing publication object.");
+            if (entry != null && !Matches(store, entry))
                 throw new InvalidOperationException("The selected object is not a publication object for this store.");
-            return new PublicationPlan { Store = store, Certificate = certificate, Server = Server,
+            return new PublicationPlan { Store = store, Artifact = artifact, Server = Server,
                 Object = entry == null ? new PublishedObject { Name = objectName, DistinguishedName = name } :
                     DescribeObject(entry) };
         }
@@ -323,36 +383,37 @@ namespace Certitude
         private SearchResultEntry Current(LdapConnection connection, PublishedStore store, PublishedObject expected)
         {
             // Recheck store membership and object identity immediately before a directory change.
-            var name = "CN=" + EscapeName(expected.Name) + "," + ParentName(store);
+            var name = TargetName(store, store.IsCrl ? expected.DistinguishedName : expected.Name);
             if (!name.Equals(expected.DistinguishedName, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("The publication object does not belong to the selected store.");
             var entry = Entry(connection, name, "cn", "objectGUID", "objectClass", store.Attribute);
             if ((entry == null) != (expected.Id == Guid.Empty) || (entry != null &&
-                (DescribeObject(entry).Id != expected.Id || !entry.Attributes["objectClass"].GetValues(typeof(string))
-                    .Cast<string>().Contains(store.ObjectClass, StringComparer.OrdinalIgnoreCase))))
+                (DescribeObject(entry).Id != expected.Id || !Matches(store, entry))))
                 throw new InvalidOperationException("The publication object changed. Refresh and review again.");
             return entry;
         }
 
         public void Publish(PublicationPlan plan)
         {
-            // Validate the reviewed plan against the current controller and certificate contents.
+            // Validate the reviewed plan against the current controller and artifact contents.
             if (plan.Server != Server)
                 throw new ArgumentException("The publication plan belongs to another domain controller.");
-            ValidateCertificate(plan.Store, plan.Certificate.Encoded);
+            ValidateArtifact(plan.Store, plan.Artifact.Encoded);
             using var connection = Open();
             var entry = Current(connection, plan.Store, plan.Object);
             var value = plan.Store.Id == "CrossCA" ?
-                EncodePair(plan.Certificate.Encoded, null) : plan.Certificate.Encoded;
+                EncodePair(plan.Artifact.Encoded, null) : plan.Artifact.Encoded;
             if (entry != null)
             {
                 // Reject duplicates on an existing publication object before adding the value.
                 var values = Values(connection, entry, plan.Store.Attribute);
-                var certificates = values.SelectMany(bytes => Describe(plan.Store, plan.Object, bytes));
-                if (certificates.Any(row => row.Certificate?.Encoded.SequenceEqual(plan.Certificate.Encoded) == true))
-                    throw new InvalidOperationException("This certificate is already published on this object.");
+                var duplicate = plan.Store.Id == "CrossCA" ?
+                    values.SelectMany(bytes => Describe(plan.Store, plan.Object, bytes))
+                        .Any(row => row.Encoded.SequenceEqual(plan.Artifact.Encoded)) :
+                    values.Any(bytes => bytes.SequenceEqual(value));
+                if (duplicate) throw new InvalidOperationException("This value is already published on this object.");
 
-                // Add the real certificate and remove an obsolete empty-value placeholder together.
+                // Add the real artifact and remove an obsolete empty-value placeholder together.
                 var update = new ModifyRequest(plan.Object.DistinguishedName,
                     DirectoryAttributeOperation.Add, plan.Store.Attribute, value);
                 if (values.Any(bytes => bytes.Length == 1 && bytes[0] == 0))
@@ -362,7 +423,7 @@ namespace Certitude
                 return;
             }
             // Create a missing publication container only for stores that permit new objects.
-            if (plan.Store.ExistingOnly) throw new InvalidOperationException("Select an existing enrollment service.");
+            if (plan.Store.ExistingOnly) throw new InvalidOperationException("Select an existing publication object.");
             var parent = ParentName(plan.Store);
             if (!plan.Store.FixedObject && Entry(connection, parent, "objectGUID") == null)
             {
@@ -387,7 +448,7 @@ namespace Certitude
             connection.SendRequest(request);
         }
 
-        public void Remove(PublishedCertificate row)
+        public void Remove(PublishedArtifact row)
         {
             // Revalidate the publication object and exact stored value before removing it.
             using var connection = Open();
@@ -396,12 +457,14 @@ namespace Certitude
                 throw new InvalidOperationException("The publication object was removed. Refresh again.");
             var values = Values(connection, entry, row.Store.Attribute);
             if (!values.Any(value => value.SequenceEqual(row.Value)))
-                throw new InvalidOperationException("The published certificate changed. Refresh and review again.");
+                throw new InvalidOperationException("The published value changed. Refresh and review again.");
 
             // Remove the selected value while keeping required attributes populated.
             var request = new ModifyRequest(row.Object.DistinguishedName, DirectoryAttributeOperation.Delete,
                 row.Store.Attribute, row.Value);
-            if (row.Store.RequiredValue && values.Length == 1)
+            var required = row.Store.RequiredValue || (DescribeObject(entry).IsAuthority &&
+                row.Store.IsCrl && row.Store.Id != "DeltaCRL");
+            if (required && values.Length == 1)
                 request.Modifications.Add(Change(row.Store.Attribute, DirectoryAttributeOperation.Add, new byte[1]));
             if (row.Store.Id == "CrossCA" && row.Direction >= 0)
             {

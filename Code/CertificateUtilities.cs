@@ -63,7 +63,7 @@ namespace Certitude
 
     internal sealed class TlsProbeResult
     {
-        public string Report { get; set; }
+        public TimeReport Report { get; set; }
         public byte[] Certificate { get; set; }
         public List<byte[]> Chain { get; } = new List<byte[]>();
         public SslPolicyErrors PolicyErrors { get; set; }
@@ -133,14 +133,15 @@ namespace Certitude
             return item;
         }
 
-        public static string Details(InventoryCertificate item)
+        public static TimeReport Details(InventoryCertificate item)
         {
             // Summarize identity, validity, keys, and intended purposes for the details view.
-            var text = new StringBuilder();
+            var text = new TimeReport();
             text.AppendLine("Subject: " + item.Subject).AppendLine("Issuer: " + item.Issuer);
             text.AppendLine("Friendly Name: " + item.FriendlyName).AppendLine("Serial: " + item.SerialNumber);
             text.AppendLine("SHA-1 Thumbprint: " + item.Thumbprint).AppendLine("SHA-256: " + item.Sha256);
-            text.AppendLine($"Validity (UTC): {item.NotBefore:u} to {item.NotAfter:u} · {item.Validity}");
+            text.Append("Validity: ").AppendTime(item.NotBefore).Append(" to ").AppendTime(item.NotAfter)
+                .AppendLine(" · " + item.Validity);
             text.AppendLine($"Public Key: {item.Algorithm} · {item.KeyBits} bits · Signature: {item.Signature}");
             text.AppendLine("Private Key Association: " +
                 (item.HasPrivateKey ? "Present; access not yet tested" : "Absent"));
@@ -161,9 +162,9 @@ namespace Certitude
                 {
                     text.AppendLine().AppendLine(names.Describe(extension.Oid.Value, 6) +
                         (extension.Critical ? " · Critical" : ""));
-                    text.AppendLine(names.FormatExtension(extension));
+                    text.Append(() => names.FormatExtension(extension)).AppendLine();
                 }
-            return text.ToString();
+            return text;
         }
 
         public static List<InventoryCertificate> ReadStore(StoreLocation location, string name, CancellationToken token,
@@ -415,11 +416,14 @@ namespace Certitude
         public static void ExportInventory(IEnumerable<InventoryCertificate> rows, string path)
         {
             // Serialize the inventory fields with CSV escaping and a UTF-8 signature.
+            var utc = TimeDisplay.Current.UseUtc;
+            var zone = utc ? "UTC" : "Local";
             var csv = new StringBuilder("Subject,Issuer,Friendly name,Serial number,Thumbprint,SHA256," +
-                "Valid from (UTC),Expires (UTC),Private key,CA,Algorithm,Key bits,Signature,SAN,EKU,Findings\r\n");
+                $"Valid from ({zone}),Expires ({zone}),Private key,CA,Algorithm,Key bits,Signature,SAN,EKU,Findings\r\n");
             foreach (var row in rows)
                 csv.AppendLine(string.Join(",", new[] { row.Subject, row.Issuer, row.FriendlyName, row.SerialNumber,
-                    row.Thumbprint, row.Sha256, row.NotBefore.ToString("u"), row.NotAfter.ToString("u"),
+                    row.Thumbprint, row.Sha256,
+                    TimeDisplay.Stamp(row.NotBefore, utc), TimeDisplay.Stamp(row.NotAfter, utc),
                     row.HasPrivateKey.ToString(), row.IsCa.ToString(), row.Algorithm, row.KeyBits.ToString(),
                     row.Signature, row.AlternativeNames, row.Purposes, row.Findings }.Select(CertificateStore.Csv)));
             WriteAtomic(path, new UTF8Encoding(true).GetPreamble()
@@ -457,9 +461,9 @@ namespace Certitude
             // Initialize a diagnostic report and a connection deadline linked to cancellation.
             token.ThrowIfCancellationRequested();
             var result = new TlsProbeResult { PolicyErrors = SslPolicyErrors.RemoteCertificateNotAvailable };
-            var report = new StringBuilder($"TLS endpoint: {host}:{port}\r\nSNI / expected name: {serverName}\r\n" +
-                $"Checked (UTC): {DateTime.UtcNow:u}\r\n" +
-                $"Revocation: {(revocation ? "Windows online check" : "NOT CHECKED")}\r\n");
+            var report = new TimeReport($"TLS endpoint: {host}:{port}\r\nSNI / expected name: {serverName}\r\n")
+                .Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine()
+                .AppendLine($"Revocation: {(revocation ? "Windows online check" : "NOT CHECKED")}");
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(token))
             using (var client = new TcpClient(Socket.OSSupportsIPv6 ?
                 AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork))
@@ -540,7 +544,7 @@ namespace Certitude
                         "STARTTLS and client authentication are not tested.");
                     report.AppendLine("A certificate installed or renewed in a store " +
                         "may still require a service binding update.");
-                    result.Report = report.ToString();
+                    result.Report = report;
                     return result;
                 }
             }

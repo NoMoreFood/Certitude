@@ -16,8 +16,8 @@ namespace Certitude
     internal sealed class OidManagerPage : WorkspacePage
     {
         private readonly DockPanel layout = new DockPanel { Margin = new Thickness(8) };
-        private readonly TextBox server = new TextBox();
-        private readonly TextBox search = new TextBox { MinWidth = 180 };
+        private readonly TextBox server = new TextBox { Width = 360, Margin = new Thickness(0, 0, 8, 4) };
+        private readonly TextBox search = new TextBox { Width = 340, Margin = new Thickness(0, 0, 0, 4) };
         private readonly ComboBox kind = new ComboBox { Width = 165 };
         private readonly TextBlock target = new TextBlock { TextWrapping = TextWrapping.Wrap };
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
@@ -49,13 +49,16 @@ namespace Certitude
             Dialogs.Note(header, "Review forest OIDs and manage custom application and issuance policies using your " +
                 "Windows identity. Directory changes require permission to manage the forest's OIDs.");
 
-            // Place the domain input beside the action that loads its forest OIDs.
-            header.Children.Add(Glyphs.Label("Domain / Domain Controller (Blank = Current Domain)"));
-            var connection = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            var loadButtons = Dialogs.RightActions(connection);
-            Dialogs.Button(loadButtons, "_Load Directory", async () => await Refresh(true));
+            // Keep directory discovery beside its input and make the forest-wide result scope explicit.
+            header.Children.Add(Glyphs.Label("Domain / Domain Controller (Blank = Automatic)"));
+            var connection = new WrapPanel();
             connection.Children.Add(server);
+            Dialogs.Button(connection, "_Load Directory", async () => await Refresh(true));
             header.Children.Add(connection);
+            var scope = new TextBlock { Text = "Forest-Wide Results", FontSize = 10,
+                Margin = new Thickness(0, 0, 0, 4) };
+            scope.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+            header.Children.Add(scope);
             header.Children.Add(target);
 
             // Expose refresh and selected-policy actions above the result filters.
@@ -67,16 +70,15 @@ namespace Certitude
             Dialogs.Button(actions, "_Copy OID", () => Dialogs.CopyText((grid.SelectedItem as DirectoryOid)?.Value));
 
             // Combine the OID type filter with a text search across policy metadata.
-            var filters = new DockPanel { Margin = new Thickness(0, 6, 0, 15) };
-            DockPanel.SetDock(kind, Dock.Right);
-            kind.Margin = new Thickness(6, 0, 0, 0);
+            var filters = new WrapPanel { Margin = new Thickness(0, 6, 0, 11) };
+            kind.Margin = new Thickness(0, 0, 8, 4);
             kind.ItemsSource = new[] { "All OIDs", "Application Policy", "Issuance Policy", "Certificate Template",
                 "Other / Forest OID" };
             kind.SelectedIndex = 0;
             filters.Children.Add(kind);
             var label = Glyphs.Label("Search", true);
             label.Target = search;
-            DockPanel.SetDock(label, Dock.Left);
+            label.Margin = new Thickness(0, 0, 6, 4);
             filters.Children.Add(label);
             filters.Children.Add(search);
             search.ToolTip = "Filter by display name, numeric OID, type, template or distinguished name.";
@@ -285,14 +287,14 @@ namespace Certitude
             // Collect the policy name, numeric OID, and registration type.
             var form = new StackPanel();
             Dialogs.Note(form, "Domain Controller: " + directory.Server + "\r\nForest: " + directory.ConfigurationName);
-            var name = Dialogs.Field(form, "Display Name");
+            var name = Dialogs.Field(form, "Display Name", width: 360);
             name.MaxLength = 256;
-            var oid = Dialogs.Field(form, "Numeric OID");
+            var oid = Dialogs.Field(form, "Numeric OID", width: 400);
             var policyLabel = Glyphs.Label("Policy Type");
             policyLabel.Margin = new Thickness(0, 5, 0, 3);
             form.Children.Add(policyLabel);
             var kind = new ComboBox { ItemsSource = new[] { "Application Policy (Enhanced Key Usage)", "Issuance Policy" },
-                SelectedIndex = 0 };
+                SelectedIndex = 0, Width = 320, HorizontalAlignment = HorizontalAlignment.Left };
             form.Children.Add(kind);
 
             // Explain registration scope and place the form in a scrollable workspace.

@@ -42,7 +42,7 @@ namespace Certitude
 
             // Collect the destination folder and optional private-key backup password.
             folder = Dialogs.Field(editor, "Backup / Results Parent Folder (Existing Local Folder)",
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), width: 640);
             editor.Children.Add(new TextBlock { Text = "Private-Key Backup Password (CA And Private Key Backup Only)",
                 Margin = new Thickness(0, 5, 0, 3) });
             password = new PasswordBox { MaxWidth = 380, HorizontalAlignment = HorizontalAlignment.Left };

@@ -84,6 +84,8 @@ namespace Certitude
         public string Title { get; set; }
         public DependencyObject Owner { get; set; }
         public event CancelEventHandler Closing;
+        internal event Action<bool> TimeChanged;
+        internal void RefreshTimes(bool previousUtc) => TimeChanged?.Invoke(previousUtc);
         public async Task<bool?> ShowAsync()
         {
             // Await an inline page result while temporarily restoring the input cursor.
@@ -115,14 +117,15 @@ namespace Certitude
     internal sealed class FilePicker : WorkspacePage
     {
         private readonly bool save;
-        private readonly TextBox folder = new TextBox();
-        private readonly TextBox names = new TextBox();
-        private readonly ComboBox formats = new ComboBox();
+        private readonly TextBox folder = new TextBox { Width = 420, Margin = new Thickness(0, 0, 8, 4) };
+        private readonly TextBox names = new TextBox { Width = 640, HorizontalAlignment = HorizontalAlignment.Left };
+        private readonly ComboBox formats = new ComboBox { Width = 240, Margin = new Thickness(0, 0, 8, 4) };
         private readonly DataGrid files = new DataGrid { SelectionMode = DataGridSelectionMode.Single };
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
         private string[] patterns;
         private int generation;
         private bool initialized;
+        private bool accepting;
         public string Filter { get; set; } = "All Files|*.*";
         public string FileName { get; set; } = "";
         public string[] FileNames { get; private set; } = Array.Empty<string>();
@@ -135,17 +138,17 @@ namespace Certitude
             this.save = save;
             Title = save ? "Save File" : "Open File";
             var panel = new DockPanel { Margin = new Thickness(8) };
-            var header = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var header = new WrapPanel { Margin = new Thickness(0, 0, 0, 2) };
             DockPanel.SetDock(header, Dock.Top);
             panel.Children.Add(header);
-            var actions = Dialogs.RightActions(header);
-            Dialogs.Button(actions, "_Up", async () =>
+            header.Children.Add(folder);
+            Dialogs.Button(header, "_Up", async () =>
             {
                 try { await ReadFolder(Directory.GetParent(folder.Text)?.FullName ?? folder.Text); }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
-            Dialogs.Button(actions, "_Go", async () => await ReadFolder(folder.Text));
-            Dialogs.Button(actions, "New _Folder", async () =>
+            Dialogs.Button(header, "_Go", async () => await ReadFolder(folder.Text));
+            Dialogs.Button(header, "New _Folder", async () =>
             {
                 // Create a user-named child folder and immediately navigate into it.
                 var name = await Dialogs.Prompt(this, "New Folder", "Folder Name", "");
@@ -153,7 +156,6 @@ namespace Certitude
                 try { await ReadFolder(Directory.CreateDirectory(Path.Combine(folder.Text, name)).FullName); }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
-            header.Children.Add(folder);
             folder.KeyDown += async (sender, e) =>
             {
                 // Treat Enter in the path field as navigation without forwarding the key to the page.
@@ -168,19 +170,21 @@ namespace Certitude
             panel.Children.Add(footer);
             footer.Children.Add(new TextBlock { Text = "File Name / Full Path", Margin = new Thickness(0, 6, 0, 3) });
             footer.Children.Add(names);
-            var choices = new DockPanel { Margin = new Thickness(0, 6, 0, 4) };
+            var choices = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
             footer.Children.Add(choices);
-            var buttons = Dialogs.RightActions(choices);
-            Dialogs.Button(buttons, save ? "_Save" : "_Open", async () => await Accept());
-            Dialogs.Button(buttons, "_Cancel", Close);
             choices.Children.Add(formats);
+            Dialogs.Button(choices, save ? "_Save" : "_Open", async () => await Accept());
+            Dialogs.Button(choices, "_Cancel", Close);
             footer.Children.Add(status);
 
             // Show file metadata and mirror selected filenames into the editable selection field.
             files.Columns.Add(new DataGridTextColumn { Header = "Name", Binding = new Binding("Name"),
                 Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
             files.Columns.Add(new DataGridTextColumn { Header = "Type", Binding = new Binding("Type"), Width = 100 });
-            files.Columns.Add(new DataGridTextColumn { Header = "Modified", Binding = new Binding("Modified"), Width = 160 });
+            var modified = new DataGridTextColumn { Header = "Modified (UTC)", SortMemberPath = "Modified",
+                Binding = TimeDisplay.Binding("Modified", "yyyy-MM-dd HH:mm"), Width = 160 };
+            TimeDisplay.Label(modified, DataGridColumn.HeaderProperty, "Modified (UTC)");
+            files.Columns.Add(modified);
             BusyCursor.OnSorting(files);
             files.SelectionChanged += (sender, e) =>
             {
@@ -250,7 +254,7 @@ namespace Certitude
                     .Take(5001).Select(item => new FileChoice
                     {
                         Name = item.Name, Path = item.FullName, Directory = (item.Attributes & FileAttributes.Directory) != 0,
-                        Modified = item.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                        Modified = item.LastWriteTimeUtc
                     }).OrderByDescending(item => item.Directory).ThenBy(item => item.Name).ToArray());
 
                 // Publish only the current request and cap the displayed list while allowing full-path entry.
@@ -264,6 +268,10 @@ namespace Certitude
 
         private async Task Accept()
         {
+            if (accepting) return;
+            accepting = true;
+            using var cursor = BusyCursor.Enter();
+            var request = generation;
             try
             {
                 // Resolve typed names against the current folder and allow directory entries to navigate.
@@ -271,30 +279,39 @@ namespace Certitude
                     .Select(name => Path.GetFullPath(Path.Combine(folder.Text, name.Trim().Trim('"')))).ToArray();
                 if (paths.Length == 0 || (!Multiselect && paths.Length != 1))
                     throw new ArgumentException("Enter a file path.");
-                if (paths.Length == 1 && Directory.Exists(paths[0])) { await ReadFolder(paths[0]); return; }
+                var directory = await Task.Run(() => paths.Length == 1 && Directory.Exists(paths[0]));
+                if (request != generation) return;
+                if (directory) { await ReadFolder(paths[0]); return; }
 
                 // Apply the selected save extension and reject missing files or destination folders.
                 var extension = patterns[formats.SelectedIndex].Split(';')[0];
                 if (save && !Path.HasExtension(paths[0]) && extension.StartsWith("*.") && extension != "*.*")
                     paths[0] += extension.Substring(1);
-                if (!save && paths.Any(path => !File.Exists(path))) throw new FileNotFoundException("A selected file does not exist.");
-                if (save && !Directory.Exists(Path.GetDirectoryName(paths[0])))
-                    throw new DirectoryNotFoundException("The destination folder does not exist.");
+                var exists = await Task.Run(() =>
+                {
+                    if (!save && paths.Any(path => !File.Exists(path)))
+                        throw new FileNotFoundException("A selected file does not exist.");
+                    if (save && !Directory.Exists(Path.GetDirectoryName(paths[0])))
+                        throw new DirectoryNotFoundException("The destination folder does not exist.");
+                    return save && File.Exists(paths[0]);
+                });
+                if (request != generation) return;
 
                 // Confirm replacement before returning the chosen paths to the calling workflow.
-                if (save && File.Exists(paths[0]) && !await Dialogs.Confirm(this, "Replace File", paths[0])) return;
+                if (exists && !await Dialogs.Confirm(this, "Replace File", paths[0])) return;
                 FileNames = paths;
                 FileName = paths[0];
                 DialogResult = true;
             }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
+            finally { accepting = false; }
         }
 
         private sealed class FileChoice
         {
             public string Name { get; set; }
             public string Path { get; set; }
-            public string Modified { get; set; }
+            public DateTime Modified { get; set; }
             public bool Directory { get; set; }
             public string Type => Directory ? "Folder" : "File";
         }

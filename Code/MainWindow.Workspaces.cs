@@ -38,6 +38,17 @@ namespace Certitude
                     CaAdministration.Error(error));
             }
             // Restore saved controls before falling back to automatic local-CA selection.
+            TimeDisplay.Current.UseUtc = savedWorkspace.UseUtc;
+            UtcToggle.IsChecked = savedWorkspace.UseUtc;
+            foreach (var column in Certificates.Columns.Where(column =>
+                column.SortMemberPath is nameof(CertificateRow.NotBefore) or nameof(CertificateRow.NotAfter)))
+            {
+                TimeDisplay.Label(column, DataGridColumn.HeaderProperty, Convert.ToString(column.Header));
+                ((DataGridTextColumn)column).Binding = TimeDisplay.Binding(column.SortMemberPath, "yyyy-MM-dd HH:mm");
+            }
+            TimeDisplay.Label(SearchHint, TextBlock.TextProperty, "Live Filtering · Time Zone: UTC");
+            TimeDisplay.Label(ExpiresFrom, ToolTipProperty, "UTC Date / Time: yyyy-MM-dd [HH:mm:ss [offset]]");
+            TimeDisplay.Label(ExpiresBefore, ToolTipProperty, "UTC Date / Time: yyyy-MM-dd [HH:mm:ss [offset]]");
             configurations = savedWorkspace.Authorities.ToArray();
             RestoreViewControls(savedWorkspace.Current);
             if (ConfigurationBox.Text.Length == 0)
@@ -98,6 +109,7 @@ namespace Certitude
                     savedWorkspace.Current.Columns = CaptureColumns();
                     savedWorkspace.Current.AutoAuthorityColumn = autoAuthorityColumn;
                 }
+                savedWorkspace.UseUtc = TimeDisplay.Current.UseUtc;
                 savedWorkspace.Authorities = CaDirectory.Configurations(configurations).ToList();
                 savedWorkspace.Save(BrowserWorkspace.DefaultPath);
                 WorkspaceWarning("");
@@ -110,7 +122,7 @@ namespace Certitude
             }
         }
 
-        private void UpdateRelativeExpiry()
+        private void UpdateRelativeExpiry(DateTime? utcNow = null)
         {
             // Advance rolling UTC boundaries without scheduling recursive filter refreshes.
             if (!expiryDays.HasValue) return;
@@ -118,9 +130,9 @@ namespace Certitude
             restoringView = true;
             try
             {
-                var today = DateTime.UtcNow.Date;
-                ExpiresFrom.Text = expiryDays > 0 ? today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : "";
-                ExpiresBefore.Text = today.AddDays(expiryDays.Value).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                var now = utcNow ?? DateTime.UtcNow;
+                ExpiresFrom.Text = expiryDays > 0 ? TimeDisplay.Entry(now) : "";
+                ExpiresBefore.Text = TimeDisplay.Entry(now.AddDays(expiryDays.Value));
             }
             finally { restoringView = previous; }
         }
@@ -134,7 +146,7 @@ namespace Certitude
             try
             {
                 filterTimer.Stop();
-                ConfigurationBox.Text = view.Configuration;
+                ConfigurationBox.Text = ConfigurationCaption(view.Configuration);
                 // Restore the category, search and date controls using their persisted identities.
                 Views.SelectedItem = Views.Items.Cast<ListBoxItem>().Single(item =>
                     Convert.ToString(item.Tag) == Convert.ToString(filter.Disposition, CultureInfo.InvariantCulture));
@@ -142,8 +154,8 @@ namespace Certitude
                     Convert.ToString(item.Tag) == filter.Field);
                 SearchBox.Text = filter.Value;
                 MatchMode.SelectedIndex = (int)filter.Match;
-                ExpiresFrom.Text = filter.ExpiresFrom?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
-                ExpiresBefore.Text = filter.ExpiresBefore?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
+                ExpiresFrom.Text = TimeDisplay.Entry(filter.ExpiresFrom);
+                ExpiresBefore.Text = TimeDisplay.Entry(filter.ExpiresBefore);
                 PageSize.SelectedItem = PageSize.Items.Cast<ComboBoxItem>().Single(item =>
                     Convert.ToString(item.Content) == filter.PageSize.ToString(CultureInfo.InvariantCulture));
                 // Restore the rolling preset separately from the dates calculated for this session.
@@ -478,5 +490,97 @@ namespace Certitude
         private void NativeCaClick(object sender, RoutedEventArgs e) => LaunchNativeConsole(false);
 
         private void NativeTemplatesClick(object sender, RoutedEventArgs e) => LaunchNativeConsole(true);
+
+        private void ReloadLinks()
+        {
+            // Rebuild the sidebar from the executable's configuration, retaining actionable load errors inline.
+            LinksPanel.Children.Clear();
+            LinksNotice.Visibility = Visibility.Collapsed;
+            try
+            {
+                foreach (var link in ApplicationLinks.Read())
+                {
+                    var button = new Button
+                    {
+                        Content = link.Key.Replace("_", "__"), ToolTip = link.Value,
+                        HorizontalContentAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 4)
+                    };
+                    System.Windows.Automation.AutomationProperties.SetName(button, link.Key);
+                    Glyphs.SetIcon(button, Glyphs.Open);
+                    button.Click += async (sender, args) =>
+                    {
+                        // Check folder availability away from the UI thread before invoking the Windows shell.
+                        using var cursor = BusyCursor.Enter();
+                        button.IsEnabled = false;
+                        try
+                        {
+                            var target = await Task.Run(() =>
+                            {
+                                var uri = ApplicationLinks.ResolveTarget(link.Value);
+                                if (uri.IsFile && !Directory.Exists(uri.LocalPath))
+                                    throw new DirectoryNotFoundException(
+                                        "The linked folder is unavailable: " + uri.LocalPath);
+                                return uri.IsFile ? uri.LocalPath : uri.AbsoluteUri;
+                            });
+                            using var process = Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                        }
+                        catch (Exception error) { ShowError(error); }
+                        finally { button.IsEnabled = true; }
+                    };
+                    LinksPanel.Children.Add(button);
+                }
+            }
+            catch (Exception error)
+            {
+                LinksNotice.Text = "Could Not Load Links: " + CaAdministration.Error(error);
+                LinksNotice.Visibility = Visibility.Visible;
+            }
+        }
+
+        private void AddLinkClick(object sender, RoutedEventArgs e)
+        {
+            // Collect a named website or folder in the existing workspace instead of opening a dialog.
+            var page = new WorkspacePage { Title = "Add Link" };
+            var panel = new StackPanel { Margin = new Thickness(8) };
+            var name = Dialogs.Field(panel, "Button Name", width: 320);
+            name.MaxLength = 80;
+            var target = Dialogs.Field(panel, "URL Or Directory", width: 640);
+            Dialogs.Note(panel, "Use an HTTP or HTTPS URL, a local folder, or a network share. " +
+                "Environment variables are supported; relative folders start beside the application.");
+            Dialogs.Note(panel, "Links are saved in " + Path.GetFileName(ApplicationLinks.ConfigPath) +
+                " beside the executable. That file and its folder must be writable.");
+            var status = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            panel.Children.Add(status);
+            var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+            panel.Children.Add(buttons);
+            var saving = false;
+            Dialogs.Button(buttons, "_Add Link", async () =>
+            {
+                // Keep entered values available for correction when validation or persistence fails.
+                if (saving) return;
+                using var cursor = BusyCursor.Enter();
+                saving = true;
+                panel.IsEnabled = false;
+                var saved = false;
+                try
+                {
+                    var caption = name.Text;
+                    var destination = target.Text;
+                    await Task.Run(() => ApplicationLinks.Add(caption, destination));
+                    ReloadLinks();
+                    saved = true;
+                }
+                catch (Exception error) { status.Text = "Could Not Save Link: " + CaAdministration.Error(error); }
+                finally { saving = false; panel.IsEnabled = true; }
+                if (saved) { page.Close(); Record("Link saved to " + ApplicationLinks.ConfigPath); }
+            });
+
+            // Reuse workspace navigation guards while a save is in progress.
+            Dialogs.Button(buttons, "_Cancel", page.Close);
+            page.Content = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            page.Closing += (sender, args) => args.Cancel = saving;
+            page.Loaded += (sender, args) => name.Focus();
+            Navigate(page);
+        }
     }
 }

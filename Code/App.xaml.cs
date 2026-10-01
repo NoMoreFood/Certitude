@@ -4,19 +4,142 @@
 //
 
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 
 [assembly: AssemblyTitle("Certitude")]
 [assembly: AssemblyProduct("Certitude")]
 [assembly: AssemblyDescription("Windows Certificate Authority administration")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyVersion("1.0.3.0")]
+[assembly: AssemblyFileVersion("1.0.3.0")]
 
 namespace Certitude
 {
+    public sealed class TimeDisplay : INotifyPropertyChanged, IMultiValueConverter
+    {
+        public static TimeDisplay Current { get; } = new TimeDisplay();
+        private bool useUtc;
+        public bool UseUtc
+        {
+            get => useUtc;
+            set
+            {
+                if (useUtc == value) return;
+                useUtc = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+            }
+        }
+        public string Zone => UseUtc ? "UTC" : "Local";
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        internal static DateTime Utc(DateTime date) => date.Kind == DateTimeKind.Unspecified ?
+            DateTime.SpecifyKind(date, DateTimeKind.Utc) : date.ToUniversalTime();
+
+        internal static DateTime Display(DateTime date, bool? utc = null) => (utc ?? Current.UseUtc) ?
+            Utc(date) : Utc(date).ToLocalTime();
+
+        internal static string Format(DateTime date, string format = "yyyy-MM-dd HH:mm:ss", bool? utc = null) =>
+            Display(date, utc).ToString(format, CultureInfo.InvariantCulture);
+
+        internal static string Stamp(DateTime? date, bool? utc = null) => !date.HasValue ? "Not recorded" :
+            Format(date.Value, (utc ?? Current.UseUtc) ? "yyyy-MM-dd HH:mm:ss 'UTC'" : "yyyy-MM-dd HH:mm:ss zzz", utc);
+
+        internal static string Entry(DateTime? date) => date.HasValue ? Format(date.Value,
+            Current.UseUtc && date.Value.TimeOfDay == TimeSpan.Zero ? "yyyy-MM-dd" :
+                "yyyy-MM-dd HH:mm:ss.FFFFFFF" + (Current.UseUtc ? "" : " zzz")) : "";
+
+        internal static DateTime Parse(string text, bool? utc = null, string format = null)
+        {
+            // Interpret date editors in the selected zone while keeping native and persisted values in UTC.
+            var formats = format == null ? new[] { "yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss.FFFFFFF",
+                "yyyy-MM-dd HH:mm:ss.FFFFFFF zzz" } : new[] { format, format + " zzz" };
+            if (!DateTime.TryParseExact(text.Trim(), formats, CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out var date))
+            {
+                if (format != null) throw new FormatException("Enter the date and time as " + format + ".");
+                date = DateTime.Parse(text, CultureInfo.CurrentCulture, DateTimeStyles.AllowWhiteSpaces);
+            }
+            if (date.Kind != DateTimeKind.Unspecified) return date.ToUniversalTime();
+            if (utc ?? Current.UseUtc) return DateTime.SpecifyKind(date, DateTimeKind.Utc);
+            if (TimeZoneInfo.Local.IsInvalidTime(date))
+                throw new ArgumentException(
+                    "This local time does not exist because of the daylight-saving transition.");
+            return TimeZoneInfo.ConvertTimeToUtc(date);
+        }
+
+        internal static MultiBinding Binding(string path = null, string format = null, object source = null)
+        {
+            // Observe the shared display mode so existing tables and reports update immediately.
+            var binding = new MultiBinding { Converter = Current, ConverterParameter = format, Mode = BindingMode.OneWay };
+            binding.Bindings.Add(source == null ? new Binding(path) : new Binding(path) { Source = source });
+            binding.Bindings.Add(new Binding(nameof(UseUtc)) { Source = Current });
+            return binding;
+        }
+
+        internal static void Text(TextBox box, Func<string> text) =>
+            box.SetBinding(TextBox.TextProperty, Binding(source: text));
+        internal static void Text(TextBlock block, Func<string> text) =>
+            block.SetBinding(TextBlock.TextProperty, Binding(source: text));
+
+        internal static void Label(DependencyObject target, DependencyProperty property, string caption) =>
+            BindingOperations.SetBinding(target, property,
+                Binding(source: (Func<string>)(() => caption.Replace("UTC", Current.Zone))));
+
+        internal static void Input(WorkspacePage page, TextBox box, string format = "yyyy-MM-dd HH:mm:ss",
+            Func<bool> enabled = null) =>
+            page.TimeChanged += previousUtc =>
+            {
+                // Preserve an already entered instant when its editor changes zones.
+                if (string.IsNullOrWhiteSpace(box.Text) || enabled?.Invoke() == false) return;
+                try { box.Text = Format(Parse(box.Text, previousUtc, format), format + (Current.UseUtc ? "" : " zzz")); }
+                catch (Exception error) when (error is FormatException or ArgumentException) { }
+            };
+
+        public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture) =>
+            values[0] switch
+        {
+            DateTime date => Format(date, parameter as string ?? "yyyy-MM-dd HH:mm:ss"),
+            TimeReport text => text.ToString(),
+            Func<string> text => text(),
+            null => "",
+            _ => values[0]
+        };
+
+        public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture) =>
+            throw new NotSupportedException();
+    }
+
+    internal sealed class TimeReport
+    {
+        private readonly List<object> parts = new List<object>();
+        public TimeReport(string text = "") { Append(text); }
+        public TimeReport Append(string text) { parts.Add(text); return this; }
+        public TimeReport Append(Func<string> text) { parts.Add(text); return this; }
+        public TimeReport Append(TimeReport text) { parts.AddRange(text.parts); return this; }
+        public TimeReport AppendTime(DateTime? date)
+        {
+            parts.Add(date.HasValue ? (object)date.Value : "Not recorded"); return this;
+        }
+        public TimeReport AppendLine(string text = "") => Append(text).Append(Environment.NewLine);
+        public TimeReport AppendLine(TimeReport text) => Append(text).Append(Environment.NewLine);
+        public override string ToString()
+        {
+            // Retain typed timestamps until rendering, including those in nested CRL and certificate reports.
+            var text = new System.Text.StringBuilder();
+            foreach (var part in parts) text.Append(part switch
+                { DateTime date => TimeDisplay.Stamp(date), Func<string> render => render(), _ => part });
+            return text.ToString();
+        }
+        public static implicit operator string(TimeReport text) => text?.ToString();
+    }
+
     public partial class App : Application
     {
         public static bool IsDark { get; private set; }
