@@ -384,7 +384,7 @@ namespace Certitude
     {
         private readonly ComboBox reason;
         private readonly TextBox effective;
-        private static readonly int[] Codes = { 0, 1, 2, 3, 4, 5, 6, 8, 9, 10 };
+        private static readonly int[] Codes = { 0, 1, 2, 3, 4, 5, 6, 8 };
         public int Reason => Codes[reason.SelectedIndex];
         public DateTime? Effective { get; private set; }
 
@@ -399,8 +399,7 @@ namespace Certitude
                 ItemsSource = new[]
                 {
                     "0 · Unspecified", "1 · Key Compromise", "2 · CA Compromise", "3 · Affiliation Changed",
-                    "4 · Superseded", "5 · Cessation Of Operation", "6 · Certificate Hold", "8 · Remove From CRL",
-                    "9 · Privilege Withdrawn", "10 · Attribute Authority Compromise"
+                    "4 · Superseded", "5 · Cessation Of Operation", "6 · Certificate Hold", "8 · Remove From CRL"
                 },
                 SelectedIndex = 0, Width = 320, HorizontalAlignment = HorizontalAlignment.Left
             };
