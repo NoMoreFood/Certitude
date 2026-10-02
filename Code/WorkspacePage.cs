@@ -202,14 +202,18 @@ namespace Certitude
             formats.SelectionChanged += async (sender, e) =>
             {
                 // Keep the proposed save extension and visible listing consistent with the selected format.
-                FilterIndex = formats.SelectedIndex + 1;
-                if (save && names.Text.Length > 0)
+                try
                 {
-                    var extension = patterns[formats.SelectedIndex].Split(';')[0];
-                    if (extension.StartsWith("*.") && extension != "*.*")
-                        names.Text = Path.ChangeExtension(names.Text, extension.Substring(1));
+                    FilterIndex = formats.SelectedIndex + 1;
+                    if (save && names.Text.Length > 0)
+                    {
+                        var extension = patterns[formats.SelectedIndex].Split(';')[0];
+                        if (extension.StartsWith("*.") && extension != "*.*")
+                            names.Text = Path.ChangeExtension(names.Text.Trim().Trim('"'), extension.Substring(1));
+                    }
+                    if (initialized) await ReadFolder(folder.Text);
                 }
-                if (initialized) await ReadFolder(folder.Text);
+                catch (Exception error) { status.Text = CaAdministration.Error(error); }
             };
             panel.Children.Add(files);
             Content = panel;
