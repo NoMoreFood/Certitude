@@ -802,6 +802,7 @@ namespace Certitude
             tlsOutput = Output();
             Dialogs.CertificateMenu(tlsOutput, () => tlsResult?.Certificate);
             page.Children.Add(tlsOutput);
+            Dialogs.ScrollHeader(page, header);
         }
 
         private async Task CheckEndpoint() => await Run("Connecting and validating TLS…", async token =>

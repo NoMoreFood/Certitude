@@ -892,14 +892,14 @@ namespace Certitude
             catch (Exception error) { Record("Theme changed; preference could not be saved: " + error.Message); }
         }
 
-        private void WorkspaceKeyDown(object sender, KeyEventArgs e)
+        private void WindowNavigationKeyDown(object sender, KeyEventArgs e)
         {
-            // Let dropdowns and page controls dismiss their own UI before Escape navigates back.
-            if (workspace.Count > 0 && e.Key == Key.Escape)
-            {
-                workspace.Last().Close();
-                e.Handled = true;
-            }
+            // Honor control dismissal before using Escape to navigate back or cancel browser work.
+            if (e.Key != Key.Escape) return;
+            if (workspace.Count > 0) workspace.Last().Close();
+            else if (busy || queryLoads > 0 || filterTimer.IsEnabled) CancelClick(sender, e);
+            else return;
+            e.Handled = true;
         }
 
         private async void WindowKeyDown(object sender, KeyEventArgs e)
@@ -921,12 +921,7 @@ namespace Certitude
                 if (e.Key == Key.Delete)
                 { ActionClick(new MenuItem { Tag = "Delete" }, e); e.Handled = true; }
             }
-            // Use Escape for cancellation and Ctrl+F to focus browser search.
-            if (e.Key == Key.Escape && (busy || queryLoads > 0 || filterTimer.IsEnabled))
-            {
-                CancelClick(sender, e);
-                e.Handled = true;
-            }
+            // Use Ctrl+F to focus browser search.
             if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control) { SearchBox.Focus(); e.Handled = true; }
         }
 

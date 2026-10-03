@@ -8,7 +8,7 @@ Licensed under GPLv3. See LICENSE.md.
         Title="Certitude" Icon="Assets/Certitude.ico"
         Width="1280" Height="820" MinWidth="900" MinHeight="620" WindowStartupLocation="CenterScreen"
         Style="{StaticResource {x:Type Window}}"
-        Loaded="WindowLoaded" Closing="WindowClosing" PreviewKeyDown="WindowKeyDown" KeyDown="WorkspaceKeyDown">
+        Loaded="WindowLoaded" Closing="WindowClosing" PreviewKeyDown="WindowKeyDown" KeyDown="WindowNavigationKeyDown">
   <Window.Resources>
     <Style x:Key="WorkspaceIconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Width" Value="32" />

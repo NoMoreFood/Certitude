@@ -107,16 +107,17 @@ namespace Certitude
             return actions;
         }
 
-        public static void ScrollHeader(DockPanel layout, FrameworkElement header, double bodyHeight = 120)
+        public static void ScrollHeader(DockPanel layout, FrameworkElement header, double bodyHeight = 120,
+            double minimumHeight = 90)
         {
-            // Scroll expanded forms while reserving room for results and bottom-docked status controls.
+            // Scroll headers while reserving room for results and bottom-docked status controls.
             var index = layout.Children.IndexOf(header);
             layout.Children.Remove(header);
             var scroll = new ScrollViewer { Content = header, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
             DockPanel.SetDock(scroll, Dock.Top);
             layout.Children.Insert(index, scroll);
-            void Resize() => scroll.MaxHeight = Math.Max(90, layout.ActualHeight - bodyHeight -
+            void Resize() => scroll.MaxHeight = Math.Max(minimumHeight, layout.ActualHeight - bodyHeight -
                 layout.Children.OfType<FrameworkElement>().Where(item => DockPanel.GetDock(item) == Dock.Bottom)
                     .Sum(item => item.ActualHeight + item.Margin.Top + item.Margin.Bottom));
             layout.SizeChanged += (sender, e) => Resize();

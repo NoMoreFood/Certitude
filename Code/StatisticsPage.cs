@@ -85,6 +85,9 @@ namespace Certitude
             layout.Children.Add(tabs);
             Content = layout;
 
+            // Keep table rows readable when the summary cards exceed the available work area.
+            Dialogs.ScrollHeader(layout, header, 220, 40);
+
             // Organize disposition, expiry, template, and requester breakdowns into tabs.
             states = Counts("Disposition");
             expiry = Counts("Issued Certificate Expiry");
@@ -110,7 +113,7 @@ namespace Certitude
             };
             Tab("Requests", Pair(requests, Pair(types, months, true)), "Submission activity includes imported records. " +
                 "Processing time uses resolved minus submitted timestamps where both are present and ordered. " +
-                "Imported records and manual approvals affect this average.");
+                "Imported records and manual approvals affect this average.", 320);
 
             // Expose server and storage details alongside CA metadata.
             authority = Details();
@@ -125,7 +128,7 @@ namespace Certitude
             Column(files, "Size", "Size", 2);
             Tab("Storage", Pair(storage, files, true), "Logical File Lengths In Configured CA Folders, Without " +
                 "Recursing Or Double Counting Shared Folders. Database Size Includes *.edb Files; It Is Not " +
-                "Certificate Payload Size Or Reclaimable Space. Folder Totals May Include Unrelated Files.");
+                "Certificate Payload Size Or Reclaimable Space. Folder Totals May Include Unrelated Files.", 320);
 
             // Start collection once and request cancellation before leaving a busy page.
             Loaded += async (sender, e) =>
@@ -352,7 +355,7 @@ namespace Certitude
             return grid;
         }
 
-        private void Tab(string title, UIElement content, string note)
+        private void Tab(string title, FrameworkElement content, string note, double minimumHeight = 160)
         {
             // Attach explanatory text to a statistics tab without covering its content.
             var panel = new DockPanel();
@@ -361,7 +364,18 @@ namespace Certitude
             description.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
             DockPanel.SetDock(description, Dock.Bottom);
             panel.Children.Add(description);
-            panel.Children.Add(content);
+
+            // Scroll compact views without shrinking table rows or removing their virtualization bounds.
+            var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+            content.Height = minimumHeight;
+            scroll.ScrollChanged += (sender, e) =>
+            {
+                if (e.OriginalSource == scroll && e.ViewportHeightChange != 0)
+                    content.Height = Math.Max(minimumHeight,
+                        e.ViewportHeight - content.Margin.Top - content.Margin.Bottom);
+            };
+            panel.Children.Add(scroll);
             tabs.Items.Add(new TabItem { Header = title, Content = panel });
         }
     }
