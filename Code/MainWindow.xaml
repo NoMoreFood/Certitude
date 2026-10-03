@@ -100,7 +100,8 @@ Licensed under GPLv3. See LICENSE.md.
             <TextBlock Text="Certificates And Requests" FontSize="10" FontWeight="SemiBold"
                        Foreground="{DynamicResource Muted}" Margin="4,0,0,5" />
             <ListBox x:Name="Views" SelectedIndex="0" BorderThickness="0" Background="Transparent"
-                     SelectionChanged="FilterChanged" IsEnabled="False">
+                     SelectionChanged="FilterChanged" IsEnabled="False"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
               <ListBox.ItemContainerStyle>
                 <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
                   <Setter Property="Padding" Value="7,7" />

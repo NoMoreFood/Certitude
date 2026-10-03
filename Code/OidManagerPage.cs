@@ -99,6 +99,7 @@ namespace Certitude
             BusyCursor.OnSorting(grid);
             layout.Children.Add(grid);
             Content = layout;
+            Dialogs.ScrollHeader(layout, header);
 
             // Refresh filtering and selection state as the user edits the controls.
             search.TextChanged += (sender, e) => Filter();

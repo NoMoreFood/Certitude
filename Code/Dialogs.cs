@@ -106,6 +106,24 @@ namespace Certitude
             return actions;
         }
 
+        public static void ScrollHeader(DockPanel layout, FrameworkElement header, double bodyHeight = 120)
+        {
+            // Scroll expanded forms while reserving room for results and bottom-docked status controls.
+            var index = layout.Children.IndexOf(header);
+            layout.Children.Remove(header);
+            var scroll = new ScrollViewer { Content = header, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+            DockPanel.SetDock(scroll, Dock.Top);
+            layout.Children.Insert(index, scroll);
+            void Resize() => scroll.MaxHeight = Math.Max(90, layout.ActualHeight - bodyHeight -
+                layout.Children.OfType<FrameworkElement>().Where(item => DockPanel.GetDock(item) == Dock.Bottom)
+                    .Sum(item => item.ActualHeight + item.Margin.Top + item.Margin.Bottom));
+            layout.SizeChanged += (sender, e) => Resize();
+            foreach (var footer in layout.Children.OfType<FrameworkElement>()
+                .Where(item => DockPanel.GetDock(item) == Dock.Bottom))
+                footer.SizeChanged += (sender, e) => Resize();
+        }
+
         public static TextBox Field(Panel panel, string label, string value = "", bool multiline = false,
             double width = 480)
         {

@@ -86,6 +86,7 @@ namespace Certitude
             };
             layout.Children.Add(output);
             Content = layout;
+            Dialogs.ScrollHeader(layout, editor);
 
             // Batch output updates and prevent navigation before maintenance restores the service.
             timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };

@@ -36,9 +36,11 @@ namespace Certitude
         private readonly ComboBox keys = new ComboBox { Width = 135, SelectedIndex = 0,
             ItemsSource = new[] { "Any Key Status", "Has Private Key", "No Private Key" } };
         private readonly DataGrid inventory = new DataGrid { SelectionMode = DataGridSelectionMode.Extended };
+        private readonly WrapPanel inventoryActions = new WrapPanel();
         private readonly TextBox details = Output();
         private readonly TextBlock source = new TextBlock { TextWrapping = TextWrapping.Wrap };
-        private readonly TextBlock counts = new TextBlock { Margin = new Thickness(0, 4, 0, 4) };
+        private readonly TextBlock counts = new TextBlock
+            { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 4) };
         private readonly DispatcherTimer searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         private List<InventoryCertificate> rows = new List<InventoryCertificate>();
         private StoreLocation loadedLocation;
@@ -170,6 +172,7 @@ namespace Certitude
                 tabs.IsEnabled = false;
                 cancel.IsEnabled = true;
                 status.Text = message;
+                UpdateContextMenu();
                 try
                 {
                     // Refresh OID names before running the operation and append resolution status.
@@ -197,6 +200,7 @@ namespace Certitude
                     cancellation = null;
                     tabs.IsEnabled = true;
                     cancel.IsEnabled = false;
+                    UpdateContextMenu();
                 }
             }
         }
@@ -227,12 +231,12 @@ namespace Certitude
             Label(filters, "Private key association", keys);
 
             // Expose certificate details, native viewing, validation, and export actions.
-            var actions = new WrapPanel();
+            var actions = inventoryActions;
             header.Children.Add(actions);
-            Dialogs.Button(actions, "_View Details", ViewCertificate);
-            Dialogs.Button(actions, "_Windows Certificate Viewer", ViewInWindows);
-            Dialogs.Button(actions, "CRL / chain chec_k…", ValidateSelected);
-            Dialogs.Button(actions, "_Export…", async () => await Export());
+            Dialogs.Button(actions, "_View Details", ViewCertificate).Tag = "View";
+            Dialogs.Button(actions, "_Windows Certificate Viewer", ViewInWindows).Tag = "Windows";
+            Dialogs.Button(actions, "CRL / chain chec_k…", ValidateSelected).Tag = "Validate";
+            Dialogs.Button(actions, "_Export…", async () => await Export()).Tag = "Export";
             Dialogs.Button(actions, "Export _CSV…", async () => await Run("Exporting inventory…", async token =>
             {
                 // Export only the currently filtered inventory rows to CSV.
@@ -242,13 +246,13 @@ namespace Certitude
                     CertificateUtilities.ExportInventory(inventory.Items.Cast<InventoryCertificate>(), save.FileName);
                     status.Text = "Exported the filtered inventory.";
                 }
-            }));
+            })).Tag = "CSV";
 
             // Add private-key and store-editing actions to the inventory toolbar.
-            Dialogs.Button(actions, "Test private _key", async () => await PrivateKeyTest());
-            Dialogs.Button(actions, "Friendly _Name…", async () => await EditName());
-            Dialogs.Button(actions, "_Copy / Move…", async () => await Transfer());
-            Dialogs.Button(actions, "_Remove…", async () => await Remove());
+            Dialogs.Button(actions, "Test private _key", async () => await PrivateKeyTest()).Tag = "Key";
+            Dialogs.Button(actions, "Friendly _Name…", async () => await EditName()).Tag = "Name";
+            Dialogs.Button(actions, "_Copy / Move…", async () => await Transfer()).Tag = "Transfer";
+            Dialogs.Button(actions, "_Remove…", async () => await Remove()).Tag = "Remove";
             header.Children.Add(counts);
 
             // Split the inventory table from its resizable details preview.
@@ -263,6 +267,9 @@ namespace Certitude
             body.Children.Add(splitter);
             body.Children.Add(details);
             page.Children.Add(body);
+
+            // Keep inventory rows and details accessible when a narrow view or larger text expands the controls.
+            Dialogs.ScrollHeader(page, header, 150);
 
             // Define certificate metadata columns with appropriate widths and date formatting.
             foreach (var column in new[] { new[] { "Subject", "Subject", "235" }, new[] { "Friendly Name", "FriendlyName", "160" },
@@ -281,8 +288,12 @@ namespace Certitude
             }
 
             // Keep the details preview synchronized with the current inventory selection.
-            inventory.SelectionChanged += (sender, e) => TimeDisplay.Text(details, () => inventory.SelectedItem is
-                InventoryCertificate item ? CertificateUtilities.Details(item).ToString() : "");
+            inventory.SelectionChanged += (sender, e) =>
+            {
+                TimeDisplay.Text(details, () => inventory.SelectedItem is
+                    InventoryCertificate item ? CertificateUtilities.Details(item).ToString() : "");
+                UpdateContextMenu();
+            };
             inventory.MouseDoubleClick += (sender, e) =>
             {
                 // Open the native viewer only for a double-click on one selected certificate row.
@@ -297,6 +308,7 @@ namespace Certitude
             Dialogs.CertificateMenu(details, () => (inventory.SelectedItem as InventoryCertificate)?.Encoded,
                 ViewInWindows, () => cancellation == null && inventory.SelectedItems.Count == 1);
             BuildContextMenu();
+            UpdateContextMenu();
         }
 
         private void BuildContextMenu()
@@ -331,12 +343,13 @@ namespace Certitude
 
         private void UpdateContextMenu()
         {
-            // Compute action readiness from the current selection and loaded source.
+            // Keep toolbar and row-menu actions consistent with the current selection and loaded source.
             var selected = inventory.SelectedItems.Cast<InventoryCertificate>().ToArray();
             var ready = cancellation == null && inventory.IsEnabled;
             var any = ready && selected.Length > 0;
             var stored = any && loadedStore != null;
-            foreach (var item in inventory.ContextMenu.Items.OfType<MenuItem>())
+            foreach (var item in inventory.ContextMenu.Items.OfType<MenuItem>().Cast<FrameworkElement>()
+                .Concat(inventoryActions.Children.OfType<Button>()))
             {
                 // Require an appropriate selection and Windows store for each operation.
                 switch ((string)item.Tag)
@@ -353,15 +366,19 @@ namespace Certitude
                     case "Remove": item.IsEnabled = stored; break;
                     case "Select all": item.IsEnabled = ready && inventory.Items.Count > 0; break;
                     case "Reload": item.IsEnabled = ready && loadedStore != null; break;
+                    case "CSV": item.IsEnabled = ready && inventory.Items.Count > 0; break;
                 }
             }
             // Hide store-only actions when browsing a file or filtering out private keys.
-            Dialogs.FilterMenu(inventory.ContextMenu, item => (string)item.Tag switch
+            bool Applicable(FrameworkElement item) => (string)item.Tag switch
             {
                 "Key" => loadedStore != null && keys.SelectedIndex != 2,
                 "Name" or "Transfer" or "Remove" or "Reload" => loadedStore != null,
                 _ => true
-            });
+            };
+            foreach (var button in inventoryActions.Children.OfType<Button>())
+                button.Visibility = Applicable(button) ? Visibility.Visible : Visibility.Collapsed;
+            Dialogs.FilterMenu(inventory.ContextMenu, Applicable);
         }
 
         private StoreLocation Location =>
@@ -409,26 +426,13 @@ namespace Certitude
             counts.Text = $"{filtered.Count:N0} shown / {rows.Count:N0} loaded · " +
                 $"{rows.Count(row => row.NotAfter <= now):N0} expired · " +
                 $"{rows.Count(row => row.NotAfter > now && row.NotAfter <= now.AddDays(30)):N0} expire within 30 days";
+            UpdateContextMenu();
         }
 
         internal static Task<byte[]> ReadInput(string path, CancellationToken token) => Task.Run(() =>
         {
             // Read a bounded snapshot on a worker, checking cancellation between chunks.
-            token.ThrowIfCancellationRequested();
-            using var stream = File.OpenRead(path);
-            if (stream.Length > 32 * 1024 * 1024)
-                throw new ArgumentException("Select a certificate/request file no larger than 32 MB.");
-            var bytes = new byte[(int)stream.Length];
-            var offset = 0;
-            while (offset < bytes.Length)
-            {
-                token.ThrowIfCancellationRequested();
-                var count = stream.Read(bytes, offset, Math.Min(64 * 1024, bytes.Length - offset));
-                if (count == 0) throw new EndOfStreamException("The selected file changed while it was being read.");
-                offset += count;
-            }
-            token.ThrowIfCancellationRequested();
-            return bytes;
+            return CertificateUtilities.ReadBytes(path, token: token);
         }, token);
 
         private async Task OpenFile()

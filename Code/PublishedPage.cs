@@ -103,6 +103,7 @@ namespace Certitude
             BusyCursor.OnSorting(grid);
             layout.Children.Add(grid);
             Content = layout;
+            Dialogs.ScrollHeader(layout, header);
 
             // Provide type-appropriate viewing, export, and removal actions on selected rows.
             var menu = Dialogs.RowMenu(grid);
@@ -471,7 +472,7 @@ namespace Certitude
                     var info = new FileInfo(path);
                     if (!info.Exists || info.Length == 0 || info.Length > 32 * 1024 * 1024)
                         throw new ArgumentException("Select a " + store.ItemName + " file no larger than 32 MB.");
-                    var data = File.ReadAllBytes(path);
+                    var data = CertificateUtilities.ReadBytes(path);
                     if (!store.IsCrl) return CertificateUtilities.DecodePublicPem(data);
 
                     // Accept exactly one armored CRL or an unmodified DER payload.

@@ -182,6 +182,26 @@ namespace Certitude
             }
         }
 
+        internal static byte[] ReadBytes(string path, int maximumMegabytes = 32, CancellationToken token = default)
+        {
+            // Bound file input before allocation and detect incomplete reads while honoring cancellation.
+            token.ThrowIfCancellationRequested();
+            using var stream = File.OpenRead(path);
+            if (stream.Length > maximumMegabytes * 1024L * 1024)
+                throw new InvalidDataException("Select a file no larger than " + maximumMegabytes + " MB.");
+            var bytes = new byte[(int)stream.Length];
+            var offset = 0;
+            while (offset < bytes.Length)
+            {
+                token.ThrowIfCancellationRequested();
+                var count = stream.Read(bytes, offset, Math.Min(64 * 1024, bytes.Length - offset));
+                if (count == 0) throw new EndOfStreamException("The selected file changed while it was being read.");
+                offset += count;
+            }
+            token.ThrowIfCancellationRequested();
+            return bytes;
+        }
+
         public static List<InventoryCertificate> ReadFile(byte[] bytes, string password, CancellationToken token,
             OidNames names = null)
         {

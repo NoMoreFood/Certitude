@@ -322,7 +322,8 @@ namespace Certitude
             // Collect the property identity, index, and typed value for direct CA administration.
             var panel = Page("CA _properties");
             Dialogs.Note(panel, "Read any CA API property by ID and index. Binary values use base64. " +
-                "Writable properties include role separation (23), KRA usage/count (24/25) and KRA certificates (26).");
+                "Writable properties include KRA usage (24), KRA count (25, reduction only), " +
+                "KRA certificates (26) and templates (29).");
             var property = Dialogs.Field(panel, "Property ID", "6", width: 90);
             var index = Dialogs.Field(panel, "Property index (zero-based)", "0", width: 90);
             var type = new ComboBox
@@ -365,7 +366,7 @@ namespace Certitude
                 var number = int.Parse(index.Text);
                 var kind = type.SelectedIndex + 1;
                 var data = CaAdministration.ParseValue(value.Text, kind);
-                if (id is not (23 or 24 or 25 or 26 or 29))
+                if (id is not (24 or 25 or 26 or 29))
                     throw new ArgumentException("This CA property is read-only.");
 
                 // Confirm the property change before marshaling its typed value to the CA.

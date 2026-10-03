@@ -208,10 +208,10 @@ namespace Certitude
             }
         }
 
-        public static string ReadBase64(string path)
+        public static string ReadBase64(string path, int maximumMegabytes = 32, CancellationToken token = default)
         {
             // Normalize DER or bare base64 input into the encoding expected by the CA interface.
-            var bytes = File.ReadAllBytes(path);
+            var bytes = CertificateUtilities.ReadBytes(path, maximumMegabytes, token);
             var text = Encoding.ASCII.GetString(bytes).Trim();
             if (!text.StartsWith("-----BEGIN", StringComparison.Ordinal))
             {
@@ -219,9 +219,17 @@ namespace Certitude
                     return Convert.ToBase64String(Convert.FromBase64String(text));
                 return Convert.ToBase64String(bytes);
             }
-            // Strip PEM armor and re-encode only its validated base64 body.
-            var body = string.Concat(text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .Where(line => !line.StartsWith("-----", StringComparison.Ordinal)));
+            // Require one complete PEM object with matching labels before decoding its body.
+            var headerEnd = text.StartsWith("-----BEGIN ", StringComparison.Ordinal) ?
+                text.IndexOf("-----", 11, StringComparison.Ordinal) : -1;
+            if (headerEnd < 12)
+                throw new ArgumentException("Select one complete DER or PEM object with matching headers and footers.");
+            var label = text.Substring(11, headerEnd - 11);
+            var footer = "-----END " + label + "-----";
+            if (!Regex.IsMatch(label, @"\A[A-Z0-9]+(?: [A-Z0-9]+)*\z") ||
+                !text.EndsWith(footer, StringComparison.Ordinal) || text.Length < headerEnd + 5 + footer.Length)
+                throw new ArgumentException("Select one complete DER or PEM object with matching headers and footers.");
+            var body = text.Substring(headerEnd + 5, text.Length - headerEnd - 5 - footer.Length);
             return Convert.ToBase64String(Convert.FromBase64String(body));
         }
 

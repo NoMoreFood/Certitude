@@ -165,6 +165,7 @@ namespace Certitude
             Dialogs.CertificateMenu(output, () => certificate, ready: () => cancellation == null);
             layout.Children.Add(output);
             Content = layout;
+            Dialogs.ScrollHeader(layout, editor);
 
             // Automatically validate a certificate supplied by another workspace action.
             var validateOnLoad = encoded != null;

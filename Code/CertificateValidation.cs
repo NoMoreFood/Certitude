@@ -84,7 +84,7 @@ namespace Certitude
                     foreach (var path in issuers)
                     {
                         token.ThrowIfCancellationRequested();
-                        var bytes = Convert.FromBase64String(CaAdministration.ReadBase64(path));
+                        var bytes = Convert.FromBase64String(CaAdministration.ReadBase64(path, token: token));
                         var kind = X509Certificate2.GetCertContentType(bytes);
                         if (kind is not (X509ContentType.Cert or X509ContentType.Pkcs7))
                             throw new ArgumentException("Issuer files must contain public certificates or a PKCS #7 chain.");
@@ -96,7 +96,7 @@ namespace Certitude
                     foreach (var path in crls)
                     {
                         token.ThrowIfCancellationRequested();
-                        AddCrl(store, inputs, path, Convert.FromBase64String(CaAdministration.ReadBase64(path)));
+                        AddCrl(store, inputs, path, Convert.FromBase64String(CaAdministration.ReadBase64(path, 100, token)));
                     }
 
                     // Collect the certificate distribution points for reporting and optional retrieval.

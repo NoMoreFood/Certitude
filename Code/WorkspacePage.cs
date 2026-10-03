@@ -153,7 +153,13 @@ namespace Certitude
                 // Create a user-named child folder and immediately navigate into it.
                 var name = await Dialogs.Prompt(this, "New Folder", "Folder Name", "");
                 if (name == null) return;
-                try { await ReadFolder(Directory.CreateDirectory(Path.Combine(folder.Text, name)).FullName); }
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(name) || name is "." or ".." ||
+                        name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                        throw new ArgumentException("Enter a folder name without path separators or invalid characters.");
+                    await ReadFolder(Directory.CreateDirectory(Path.Combine(folder.Text, name)).FullName);
+                }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
             folder.KeyDown += async (sender, e) =>

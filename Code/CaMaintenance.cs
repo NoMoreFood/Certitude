@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using System.ServiceProcess;
 
@@ -60,7 +61,7 @@ namespace Certitude
                 MaintenanceOperation.BackupAndLogs =>
                     "Create a full online database backup and let Certificate Services truncate backed-up logs.",
                 MaintenanceOperation.BackupCa =>
-                    "Back up the database, CA signing certificate and exportable private key with password protection. " +
+                    "Back up the database, CA signing certificates and exportable private keys with password protection. " +
                     "Export CA configuration and preserve transaction logs. HSM keys require their provider's backup tools.",
                 MaintenanceOperation.Configuration =>
                     "Export the local CA's registry configuration for recovery. This does not include private keys.",
@@ -205,14 +206,50 @@ namespace Certitude
                 RunTool("reg.exe", "export " + ToolWindow.QuoteArgument("HKLM\\" + ConfigurationKey) + " " +
                     ToolWindow.QuoteArgument(Path.Combine(plan.Destination, "CA-Configuration.reg")), output);
             }
-            // Complete the online backup with the chosen key and log retention policy.
+            // Export every CA signing key in process so the backup password never enters a command line.
+            if (plan.Operation == MaintenanceOperation.BackupCa)
+            {
+                output("Backing Up CA Signing Certificates And Private Keys…");
+                using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+                store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
+                var installed = store.Certificates;
+                try
+                {
+                    var signing = CaAdministration.Use(plan.Configuration, admin =>
+                    {
+                        var certificates = new X509Certificate2Collection();
+                        var count = Convert.ToInt32(admin.GetCAProperty(plan.Configuration, 11, 0, 1, 0));
+                        for (var index = 0; index < count; index++)
+                        {
+                            using var certificate = new X509Certificate2(Convert.FromBase64String(Convert.ToString(
+                                admin.GetCAProperty(plan.Configuration, 12, index, 3, 1))));
+                            var key = installed.Cast<X509Certificate2>().FirstOrDefault(item =>
+                                item.Thumbprint == certificate.Thumbprint && item.HasPrivateKey);
+                            if (key == null)
+                                throw new InvalidOperationException(
+                                    "A CA signing private key is unavailable in the Local Machine Personal store.");
+                            certificates.Add(key);
+                        }
+                        if (certificates.Count == 0)
+                            throw new InvalidOperationException("The CA did not return any signing certificates.");
+                        return certificates;
+                    });
+
+                    // Write the encrypted key archive alongside the configuration and database backup.
+                    var bytes = signing.Export(X509ContentType.Pkcs12, password);
+                    try { CertificateUtilities.WriteAtomic(Path.Combine(plan.Destination, "CA-Signing-Keys.p12"), bytes); }
+                    finally { Array.Clear(bytes, 0, bytes.Length); }
+                    output("CA Signing Certificates And Private Keys Backed Up.");
+                }
+                finally { foreach (var certificate in installed) certificate.Dispose(); }
+            }
+
+            // Complete the online database backup with the chosen log retention policy.
             if (plan.Operation != MaintenanceOperation.Configuration && plan.Operation != MaintenanceOperation.Integrity)
             {
                 output("Creating Online Backup…");
-                var backup = plan.Operation == MaintenanceOperation.BackupCa ?
-                    "-p " + ToolWindow.QuoteArgument(password) + " -backup " : "-backupDB ";
                 var logs = plan.Operation == MaintenanceOperation.BackupAndLogs ? "" : " KeepLog";
-                RunTool("certutil.exe", "-config " + ToolWindow.QuoteArgument(plan.Configuration) + " " + backup +
+                RunTool("certutil.exe", "-config " + ToolWindow.QuoteArgument(plan.Configuration) + " -backupDB " +
                     ToolWindow.QuoteArgument(Path.Combine(plan.Destination, "Database")) + logs, output);
                 output("Backup Completed: " + plan.Destination);
             }

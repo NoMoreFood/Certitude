@@ -90,10 +90,13 @@ namespace Certitude
         public PublishedStore Store { get; set; }
         public PublishedObject Object { get; set; }
         public PublishedArtifact Artifact { get; set; }
+        public PublishedArtifact Previous { get; set; }
         public string Server { get; set; }
         public string Review => "Domain Controller: " + Server + "\r\nStore: " + Store.Name +
             "\r\nDirectory Object: " + Object.DistinguishedName + "\r\n" +
-            (Object.Id == Guid.Empty ? "Create A New Publication Object" : "Add To The Existing Publication Object") +
+            (Object.Id == Guid.Empty ? "Create A New Publication Object" : Previous != null ?
+                "Replace The Existing Base CRL\r\nCurrent SHA-256: " + Previous.Fingerprint :
+                "Add To The Existing Publication Object") +
             "\r\n\r\n" + Store.Effect + "\r\n\r\n" + Artifact.Details;
     }
 
@@ -250,7 +253,8 @@ namespace Certitude
             OidNames names = null)
         {
             // Ignore the required-attribute placeholder and fingerprint real publication values.
-            if (value.Length == 1 && value[0] == 0) return Array.Empty<PublishedArtifact>();
+            if (store.RequiredValue && value.Length == 1 && value[0] == 0)
+                return Array.Empty<PublishedArtifact>();
             string fingerprint;
             using (var hash = SHA256.Create())
                 fingerprint = BitConverter.ToString(hash.ComputeHash(value)).Replace("-", "");
@@ -375,9 +379,17 @@ namespace Certitude
                 throw new InvalidOperationException("Select an existing publication object.");
             if (entry != null && !Matches(store, entry))
                 throw new InvalidOperationException("The selected object is not a publication object for this store.");
-            return new PublicationPlan { Store = store, Artifact = artifact, Server = Server,
+            var plan = new PublicationPlan { Store = store, Artifact = artifact, Server = Server,
                 Object = entry == null ? new PublishedObject { Name = objectName, DistinguishedName = name } :
                     DescribeObject(entry) };
+
+            // Retain the reviewed base CRL because its directory attribute accepts only one value.
+            if (store.Id == "BaseCRL" && entry != null)
+            {
+                var previous = Values(connection, entry, store.Attribute).SingleOrDefault();
+                if (previous != null) plan.Previous = Describe(store, plan.Object, previous, Names).Single();
+            }
+            return plan;
         }
 
         private SearchResultEntry Current(LdapConnection connection, PublishedStore store, PublishedObject expected)
@@ -412,6 +424,22 @@ namespace Certitude
                         .Any(row => row.Encoded.SequenceEqual(plan.Artifact.Encoded)) :
                     values.Any(bytes => bytes.SequenceEqual(value));
                 if (duplicate) throw new InvalidOperationException("This value is already published on this object.");
+
+                // Replace a single-valued base CRL only while the reviewed value is still current.
+                if (plan.Store.Id == "BaseCRL")
+                {
+                    if (plan.Previous == null ? values.Length != 0 :
+                        values.Length != 1 || !values[0].SequenceEqual(plan.Previous.Value))
+                        throw new InvalidOperationException("The base CRL changed. Refresh and review again.");
+                    var replacement = new ModifyRequest(plan.Object.DistinguishedName);
+                    if (plan.Previous != null)
+                        replacement.Modifications.Add(Change(
+                            plan.Store.Attribute, DirectoryAttributeOperation.Delete, plan.Previous.Value));
+                    replacement.Modifications.Add(Change(
+                        plan.Store.Attribute, DirectoryAttributeOperation.Add, value));
+                    connection.SendRequest(replacement);
+                    return;
+                }
 
                 // Add the real artifact and remove an obsolete empty-value placeholder together.
                 var update = new ModifyRequest(plan.Object.DistinguishedName,
