@@ -46,6 +46,18 @@ Licensed under GPLv3. See LICENSE.md.
       <Setter Property="Margin" Value="0,0,6,0" />
       <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
+    <Style x:Key="{x:Static SystemParameters.FocusVisualStyleKey}" TargetType="Control">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate>
+            <Grid Margin="2" SnapsToDevicePixels="True">
+              <Rectangle Stroke="{DynamicResource Surface}" StrokeThickness="3" />
+              <Rectangle Stroke="{DynamicResource Ink}" StrokeThickness="1" StrokeDashArray="2,2" />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="Window">
       <Setter Property="FontFamily" Value="Segoe UI" />
       <Setter Property="FontSize" Value="12" />
@@ -73,9 +85,11 @@ Licensed under GPLv3. See LICENSE.md.
       <ControlTemplate.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
           <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Hover}" />
+          <Setter Property="Foreground" Value="{DynamicResource SelectionInk}" />
         </Trigger>
         <Trigger Property="IsPressed" Value="True">
           <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Selection}" />
+          <Setter Property="Foreground" Value="{DynamicResource SelectionInk}" />
         </Trigger>
         <Trigger Property="IsKeyboardFocused" Value="True">
           <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource Accent}" />
@@ -194,6 +208,7 @@ Licensed under GPLv3. See LICENSE.md.
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Hover}" />
+                <Setter Property="Foreground" Value="{DynamicResource SelectionInk}" />
               </Trigger>
               <Trigger Property="IsSelected" Value="True">
                 <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Selection}" />
@@ -380,9 +395,11 @@ Licensed under GPLv3. See LICENSE.md.
               </Trigger>
               <Trigger Property="IsHighlighted" Value="True">
                 <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Hover}" />
+                <Setter Property="Foreground" Value="{DynamicResource SelectionInk}" />
               </Trigger>
               <Trigger Property="IsSubmenuOpen" Value="True">
                 <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Selection}" />
+                <Setter Property="Foreground" Value="{DynamicResource SelectionInk}" />
               </Trigger>
               <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
             </ControlTemplate.Triggers>
@@ -416,6 +433,9 @@ Licensed under GPLv3. See LICENSE.md.
               <Trigger Property="IsSelected" Value="True">
                 <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Surface}" />
                 <Setter TargetName="TabCaption" Property="TextElement.Foreground" Value="{DynamicResource Accent}" />
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="TabCaption" Property="TextElement.Foreground" Value="{DynamicResource SelectionInk}" />
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>

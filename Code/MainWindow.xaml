@@ -8,7 +8,7 @@ Licensed under GPLv3. See LICENSE.md.
         Title="Certitude" Icon="Assets/Certitude.ico"
         Width="1280" Height="820" MinWidth="900" MinHeight="620" WindowStartupLocation="CenterScreen"
         Style="{StaticResource {x:Type Window}}"
-        Loaded="WindowLoaded" Closing="WindowClosing" PreviewKeyDown="WindowKeyDown">
+        Loaded="WindowLoaded" Closing="WindowClosing" PreviewKeyDown="WindowKeyDown" KeyDown="WorkspaceKeyDown">
   <Window.Resources>
     <Style x:Key="WorkspaceIconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Width" Value="32" />
@@ -46,10 +46,12 @@ Licensed under GPLv3. See LICENSE.md.
           <CheckBox x:Name="UtcToggle" Content="Show Times In _UTC" Click="UtcClick" Margin="0,0,0,4"
                     Foreground="{DynamicResource HeaderInk}" ToolTip="Use UTC instead of the current local time zone." />
           <Button x:Name="ThemeButton" Content="{DynamicResource ThemeAction}" Click="ThemeClick"
+                  Visibility="{DynamicResource ThemeVisibility}"
                   HorizontalAlignment="Right" Margin="0" local:Glyphs.Icon="{x:Static local:Glyphs.Theme}" />
         </StackPanel>
         <StackPanel x:Name="ConnectionPanel" HorizontalAlignment="Left">
-          <Label Content="Certificate Authority" Style="{StaticResource FieldLabelStyle}"
+          <Label x:Name="ConfigurationLabel" Content="Certificate Authority" Style="{StaticResource FieldLabelStyle}"
+                 Target="{Binding ElementName=ConfigurationBox}"
                  local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}"
                  Foreground="{DynamicResource HeaderMuted}" FontSize="11" Margin="0,0,0,4" />
           <DockPanel>
@@ -58,6 +60,7 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="DiscoverButton" DockPanel.Dock="Right" Content="_Find CAs" Click="DiscoverClick" Margin="5,0,0,0"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
             <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False" Width="360"
+                      AutomationProperties.LabeledBy="{Binding ElementName=ConfigurationLabel}"
                       ToolTip="Select All Certificate Authorities to search every listed authority, select one CA, or enter SERVER\CA Name.">
               <ComboBox.ItemTemplate>
                 <DataTemplate>
@@ -200,9 +203,12 @@ Licensed under GPLv3. See LICENSE.md.
                   <ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel Margin="0,0,6,0" VerticalAlignment="Bottom">
-                  <Label Content="Search Field" Style="{StaticResource FieldLabelStyle}" FontSize="11" Margin="0,0,0,2"
+                  <Label x:Name="SearchFieldLabel" Content="Search Field" Style="{StaticResource FieldLabelStyle}"
+                         FontSize="11" Margin="0,0,0,2"
+                         Target="{Binding ElementName=SearchField}"
                          local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
-                  <ComboBox x:Name="SearchField" SelectedIndex="0" SelectionChanged="FilterChanged">
+                  <ComboBox x:Name="SearchField" SelectedIndex="0" SelectionChanged="FilterChanged"
+                            AutomationProperties.LabeledBy="{Binding ElementName=SearchFieldLabel}">
                     <ComboBoxItem Content="All Fields" Tag="All" />
                     <ComboBoxItem Content="Common Name" Tag="CommonName" />
                     <ComboBoxItem Content="Requester" Tag="RequesterName" />
@@ -213,16 +219,22 @@ Licensed under GPLv3. See LICENSE.md.
                   </ComboBox>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Margin="0,0,6,0" VerticalAlignment="Bottom">
-                  <Label Content="Match" Style="{StaticResource FieldLabelStyle}" FontSize="11" Margin="0,0,0,2"
+                  <Label x:Name="MatchLabel" Content="Match" Style="{StaticResource FieldLabelStyle}"
+                         FontSize="11" Margin="0,0,0,2"
+                         Target="{Binding ElementName=MatchMode}"
                          local:Glyphs.Icon="{x:Static local:Glyphs.Filter}" />
-                  <ComboBox x:Name="MatchMode" SelectedIndex="0" SelectionChanged="FilterChanged">
+                  <ComboBox x:Name="MatchMode" SelectedIndex="0" SelectionChanged="FilterChanged"
+                            AutomationProperties.LabeledBy="{Binding ElementName=MatchLabel}">
                     <ComboBoxItem Content="Contains" /><ComboBoxItem Content="Starts With" /><ComboBoxItem Content="Exact" />
                   </ComboBox>
                 </StackPanel>
                 <StackPanel Grid.Column="2" Margin="0,0,6,0" VerticalAlignment="Bottom">
-                  <Label Content="Search" Style="{StaticResource FieldLabelStyle}" FontSize="11" Margin="0,0,0,2"
+                  <Label x:Name="SearchLabel" Content="Search" Style="{StaticResource FieldLabelStyle}"
+                         FontSize="11" Margin="0,0,0,2"
+                         Target="{Binding ElementName=SearchBox}"
                          local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
-                  <TextBox x:Name="SearchBox" TextChanged="FilterChanged" ToolTip="Leave empty to show all matching records." />
+                  <TextBox x:Name="SearchBox" TextChanged="FilterChanged" ToolTip="Leave empty to show all matching records."
+                           AutomationProperties.LabeledBy="{Binding ElementName=SearchLabel}" />
                 </StackPanel>
                 <Button Grid.Column="3" Content="_Refresh" Click="RefreshClick" VerticalAlignment="Bottom" Margin="0"
                         local:Glyphs.Icon="{x:Static local:Glyphs.Refresh}" />
@@ -230,15 +242,18 @@ Licensed under GPLv3. See LICENSE.md.
               <WrapPanel Margin="0,5,0,0">
                 <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
                   <TextBlock Text="Expires From" VerticalAlignment="Center" Margin="0,0,6,0" />
-                  <TextBox x:Name="ExpiresFrom" Width="153" TextChanged="FilterChanged" />
+                  <TextBox x:Name="ExpiresFrom" Width="153" TextChanged="FilterChanged"
+                           AutomationProperties.Name="Expires From" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
                   <TextBlock Text="Before" VerticalAlignment="Center" Margin="0,0,6,0" />
-                  <TextBox x:Name="ExpiresBefore" Width="153" TextChanged="FilterChanged" />
+                  <TextBox x:Name="ExpiresBefore" Width="153" TextChanged="FilterChanged"
+                           AutomationProperties.Name="Expires Before" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="0,0,8,4">
                   <TextBlock Text="Page Size" VerticalAlignment="Center" Margin="0,0,6,0" />
-                  <ComboBox x:Name="PageSize" Width="70" SelectedIndex="1" SelectionChanged="FilterChanged">
+                  <ComboBox x:Name="PageSize" Width="70" SelectedIndex="1" SelectionChanged="FilterChanged"
+                            AutomationProperties.Name="Page Size">
                     <ComboBoxItem Content="500" /><ComboBoxItem Content="1000" />
                     <ComboBoxItem Content="5000" /><ComboBoxItem Content="10000" />
                     <ComboBoxItem Content="15000" /><ComboBoxItem Content="20000" />
@@ -246,6 +261,7 @@ Licensed under GPLv3. See LICENSE.md.
                   </ComboBox>
                 </StackPanel>
                 <ComboBox x:Name="ExpiryPresets" Width="132" Margin="0,0,6,4"
+                          AutomationProperties.Name="Expiry Presets"
                           SelectedIndex="0" SelectionChanged="ExpiryPresetClick">
                   <ComboBoxItem Content="Expiry Presets" Tag="" /><ComboBoxItem Content="All Expiry Dates" Tag="-1" />
                   <ComboBoxItem Content="Expired" Tag="0" /><ComboBoxItem Content="Next 7 Days" Tag="7" />
@@ -270,7 +286,8 @@ Licensed under GPLv3. See LICENSE.md.
               <Button Content="_Open" Click="OpenClick" local:Glyphs.Icon="{x:Static local:Glyphs.Document}" />
               <Button Content="_Issue" Tag="Issue" Click="ActionClick" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
               <Button Content="_Revoke" Tag="Revoke" Click="ActionClick" local:Glyphs.Icon="{x:Static local:Glyphs.Block}" />
-              <ComboBox x:Name="MoreActions" Width="184" SelectedIndex="0" SelectionChanged="MoreActionClick">
+              <ComboBox x:Name="MoreActions" Width="184" SelectedIndex="0" SelectionChanged="MoreActionClick"
+                        AutomationProperties.Name="More Actions">
                 <ComboBoxItem Content="More Actions" Tag="" /><ComboBoxItem Content="Deny Request" Tag="Deny" />
                 <ComboBoxItem Content="Release Certificate Hold" Tag="Release hold" />
                 <ComboBoxItem Content="Set Request Attributes" Tag="Set attributes" />

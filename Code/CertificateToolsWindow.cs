@@ -12,6 +12,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Threading;
@@ -147,6 +148,8 @@ namespace Certitude
             var field = new StackPanel { Width = control.Width, Margin = new Thickness(0, 0, 8, 4),
                 VerticalAlignment = VerticalAlignment.Bottom };
             var caption = Glyphs.Label(label);
+            caption.Target = control;
+            AutomationProperties.SetLabeledBy(control, caption);
             caption.Margin = new Thickness(0, 0, 0, 3);
             field.Children.Add(caption);
             field.Children.Add(control);

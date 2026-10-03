@@ -12,6 +12,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
 
@@ -142,6 +143,8 @@ namespace Certitude
             };
             if (!multiline) box.SetBinding(FrameworkElement.MaxWidthProperty,
                 new Binding("ActualWidth") { Source = panel });
+            caption.Target = box;
+            AutomationProperties.SetLabeledBy(box, caption);
             panel.Children.Add(box);
             return box;
         }

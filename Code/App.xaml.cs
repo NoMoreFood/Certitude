@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
+using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Certitude")]
 [assembly: AssemblyProduct("Certitude")]
@@ -173,7 +174,17 @@ namespace Certitude
             // Replace the resource brushes once so existing dynamic bindings repaint together.
             for (var i = 0; i < colors.GetLength(0); i++)
             {
-                var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(colors[i, dark ? 2 : 1]));
+                // Honor the user's contrast colors across custom controls and both application themes.
+                var color = SystemParameters.HighContrast ? colors[i, 0] switch
+                {
+                    "Ink" or "Muted" or "HeaderInk" or "HeaderMuted" or "Border" or "GridLine" =>
+                        SystemColors.WindowTextColor,
+                    "Accent" => SystemColors.HotTrackColor,
+                    "Hover" or "Selection" => SystemColors.HighlightColor,
+                    "SelectionInk" => SystemColors.HighlightTextColor,
+                    _ => SystemColors.WindowColor
+                } : (Color)ColorConverter.ConvertFromString(colors[i, dark ? 2 : 1]);
+                var brush = new SolidColorBrush(color);
                 brush.Freeze();
                 Current.Resources[colors[i, 0]] = brush;
             }
@@ -189,10 +200,14 @@ namespace Certitude
                 { SystemColors.GrayTextBrushKey, "Muted" }, { SystemColors.ScrollBarBrushKey, "SurfaceAlt" }
             };
             for (var i = 0; i < systemBrushes.GetLength(0); i++)
-                Current.Resources[systemBrushes[i, 0]] = Current.Resources[systemBrushes[i, 1]];
+            {
+                if (SystemParameters.HighContrast) Current.Resources.Remove(systemBrushes[i, 0]);
+                else Current.Resources[systemBrushes[i, 0]] = Current.Resources[systemBrushes[i, 1]];
+            }
 
             // Update the theme action and persist explicit user changes for the next launch.
             Current.Resources["ThemeAction"] = dark ? "_Light Mode" : "_Dark Mode";
+            Current.Resources["ThemeVisibility"] = SystemParameters.HighContrast ? Visibility.Collapsed : Visibility.Visible;
             if (!save) return;
             Directory.CreateDirectory(Path.GetDirectoryName(ThemePath));
             File.WriteAllText(ThemePath, dark ? "dark" : "light");
@@ -207,11 +222,26 @@ namespace Certitude
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
             ApplyTheme(dark, false);
+            SystemEvents.UserPreferenceChanged += SystemThemeChanged;
 
             // Create the main workspace after its theme resources are ready.
             var window = new MainWindow();
             MainWindow = window;
             window.Show();
+        }
+
+        private void SystemThemeChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            // Refresh open views after Windows updates contrast colors without changing the saved preference.
+            if (e.Category is UserPreferenceCategory.Accessibility or UserPreferenceCategory.Color or
+                UserPreferenceCategory.VisualStyle or UserPreferenceCategory.General)
+                Dispatcher.BeginInvoke(new Action(() => ApplyTheme(IsDark, false)));
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            SystemEvents.UserPreferenceChanged -= SystemThemeChanged;
+            base.OnExit(e);
         }
     }
 }

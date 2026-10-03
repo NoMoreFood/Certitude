@@ -892,14 +892,20 @@ namespace Certitude
             catch (Exception error) { Record("Theme changed; preference could not be saved: " + error.Message); }
         }
 
+        private void WorkspaceKeyDown(object sender, KeyEventArgs e)
+        {
+            // Let dropdowns and page controls dismiss their own UI before Escape navigates back.
+            if (workspace.Count > 0 && e.Key == Key.Escape)
+            {
+                workspace.Last().Close();
+                e.Handled = true;
+            }
+        }
+
         private async void WindowKeyDown(object sender, KeyEventArgs e)
         {
             // Give workspace pages priority over browser keyboard shortcuts.
-            if (workspace.Count > 0)
-            {
-                if (e.Key == Key.Escape) { workspace.Last().Close(); e.Handled = true; }
-                return;
-            }
+            if (workspace.Count > 0) return;
             // Route search, refresh, and selected-row shortcuts to browser actions.
             if (e.Key == Key.F5) { RefreshClick(sender, e); e.Handled = true; }
             if (e.Key == Key.Enter && SearchBox.IsKeyboardFocusWithin)
