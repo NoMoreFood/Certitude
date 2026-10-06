@@ -90,7 +90,7 @@ namespace Certitude
         public string Name { get; set => field = (value ?? "").Trim(); } = "";
         public bool Pinned { get; set; }
         public string Configuration { get; set; } = "";
-        public QuerySpec Filter { get; set; } = new QuerySpec { Field = "All", Match = SearchMatch.Contains };
+        public QuerySpec Filter { get; set; } = new QuerySpec { Match = SearchMatch.Contains };
         public int? ExpiryDays { get; set; }
         public string SortField { get; set; } = nameof(CertificateRow.RequestId);
         public ListSortDirection SortDirection { get; set; } = ListSortDirection.Descending;
@@ -104,7 +104,7 @@ namespace Certitude
             var now = utcNow.ToUniversalTime();
             return new QuerySpec
             {
-                Disposition = filter.Disposition, Field = filter.Field, Value = filter.Value,
+                Disposition = filter.Disposition, Fields = filter.Fields.ToArray(), Value = filter.Value,
                 Match = filter.Match, PageSize = filter.PageSize,
                 ExpiresFrom = ExpiryDays.HasValue ? (ExpiryDays > 0 ? now : (DateTime?)null) : filter.ExpiresFrom,
                 ExpiresBefore = ExpiryDays.HasValue ? now.AddDays(ExpiryDays.Value) : filter.ExpiresBefore
@@ -117,7 +117,7 @@ namespace Certitude
             var copy = (BrowserView)MemberwiseClone();
             copy.Filter = new QuerySpec
             {
-                Disposition = Filter.Disposition, Field = Filter.Field, Value = Filter.Value,
+                Disposition = Filter.Disposition, Fields = Filter.Fields.ToArray(), Value = Filter.Value,
                 Match = Filter.Match, PageSize = Filter.PageSize,
                 ExpiresFrom = Filter.ExpiresFrom, ExpiresBefore = Filter.ExpiresBefore
             };
@@ -178,6 +178,7 @@ namespace Certitude
         private const long MaximumFileSize = 4 * 1024 * 1024;
         private string revision;
         public int Version { get; set; } = 1;
+        public string[] SearchFields { get; set; } = new[] { "CommonName" };
         public List<string> Authorities { get; set; } = new List<string>();
         public BrowserView Current { get; set; } = new BrowserView();
         public List<BrowserView> Views { get; set; } = new List<BrowserView>();
@@ -219,6 +220,7 @@ namespace Certitude
         {
             // Keep unsupported versions and duplicate identities out of the writable workspace.
             if (Version != 1) throw new InvalidDataException("This workspace file version is not supported.");
+            new QuerySpec { Fields = SearchFields }.Validate();
             if (Authorities == null || Authorities.Count > 1000 ||
                 Authorities.Any(value => value == null || value.Length > 2048) ||
                 !Authorities.SequenceEqual(CaDirectory.Configurations(Authorities)))

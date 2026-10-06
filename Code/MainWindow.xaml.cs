@@ -101,6 +101,15 @@ namespace Certitude
 
         private async void ConnectClick(object sender, RoutedEventArgs e) => await Connect();
 
+        private async void ConfigurationSelected(object sender, SelectionChangedEventArgs e)
+        {
+            // Connect menu selections after capturing the chosen target in the editable input.
+            if (!IsLoaded || restoringView || e.AddedItems.Count == 0 ||
+                ConfigurationBox.SelectedItem is not string configuration) return;
+            ConfigurationBox.Text = configuration;
+            await Connect();
+        }
+
         private async Task Connect()
         {
             // Connect only after active work and workspace navigation allow a target change.
@@ -150,7 +159,7 @@ namespace Certitude
             var spec = new QuerySpec
             {
                 Disposition = tag.Length == 0 ? null : (int?)int.Parse(tag),
-                Field = Convert.ToString(((ComboBoxItem)SearchField.SelectedItem).Tag),
+                Fields = ReadSearchFields(),
                 Value = SearchBox.Text.Trim(),
                 Match = (SearchMatch)MatchMode.SelectedIndex,
                 ExpiresFrom = expiryDays > 0 ? now : expiryDays.HasValue ? null : ReadDate(ExpiresFrom),
@@ -358,13 +367,64 @@ namespace Certitude
 
             // Apply view changes and pasted exact serials immediately while debouncing typed filters.
             var pastedSerial = ReferenceEquals(sender, SearchBox) &&
-                (SearchField.SelectedItem as ComboBoxItem)?.Tag as string == "SerialNumber" &&
+                ReadSearchFields().SequenceEqual(new[] { "SerialNumber" }) &&
                 MatchMode.SelectedIndex == (int)SearchMatch.Exact && e is TextChangedEventArgs changes &&
                 changes.Changes.Any(change => change.AddedLength > 1);
             filterTimer.Interval = TimeSpan.FromMilliseconds(ReferenceEquals(sender, Views) || pastedSerial ? 0 : 400);
             filterTimer.Start();
             SearchHint.Text = "Filters changed; updating results…";
             UpdateControls();
+        }
+
+        private string[] ReadSearchFields() => SearchFieldOptions.Children.OfType<CheckBox>()
+            .Where(box => box.IsChecked == true).Select(box => Convert.ToString(box.Tag)).ToArray();
+
+        private void RestoreSearchFields(string[] fields)
+        {
+            // Restore checkbox identities without scheduling queries for each individual change.
+            foreach (var box in SearchFieldOptions.Children.OfType<CheckBox>())
+                box.IsChecked = fields.Contains(Convert.ToString(box.Tag));
+            UpdateSearchFieldCaption();
+        }
+
+        private void UpdateSearchFieldCaption()
+        {
+            // Summarize the selected fields in the closed menu and expose their full names on hover.
+            var selected = SearchFieldOptions.Children.OfType<CheckBox>()
+                .Where(box => box.IsChecked == true).Select(box => Convert.ToString(box.Content)).ToArray();
+            SearchFieldCaption.Text = selected.Length == 1 ? selected[0] :
+                selected.Length == CertificateStore.SearchFields.Length ? "All Fields" : $"{selected.Length} Fields";
+            SearchField.ToolTip = "Match the search text in any checked field." + Environment.NewLine +
+                string.Join(Environment.NewLine, selected);
+        }
+
+        private void SearchFieldClick(object sender, RoutedEventArgs e)
+        {
+            // Retain at least one field and remember the selection even when a query cannot be applied.
+            if (ReadSearchFields().Length == 0) { ((CheckBox)sender).IsChecked = true; return; }
+            UpdateSearchFieldCaption();
+            FilterChanged(sender, e);
+            PersistWorkspace();
+        }
+
+        private void SearchFieldOpened(object sender, EventArgs e) => SearchFieldOptions.Children.OfType<CheckBox>()
+            .First(box => box.IsChecked == true).Focus();
+
+        private void SearchFieldKeyDown(object sender, KeyEventArgs e)
+        {
+            // Support keyboard opening, dismissal and tabbing out of the checkbox menu.
+            if (ReferenceEquals(sender, SearchField) && e.Key is Key.Down or Key.F4)
+                SearchField.IsChecked = true;
+            else if (SearchField.IsChecked == true && e.Key is Key.Escape or Key.Tab or Key.F4)
+            {
+                SearchField.IsChecked = false;
+                SearchField.Focus();
+                if (e.Key == Key.Tab) SearchField.MoveFocus(new TraversalRequest(
+                    Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) ? FocusNavigationDirection.Previous :
+                    FocusNavigationDirection.Next));
+            }
+            else return;
+            e.Handled = true;
         }
 
         private void ClearViewRows()
@@ -1020,9 +1080,15 @@ namespace Certitude
         {
             // Merge discovered CA names while preserving the currently typed connection target.
             var current = ConfigurationBox.Text;
-            configurations = CaDirectory.Configurations(discovered.Concat(configurations));
-            ConfigurationBox.ItemsSource = new[] { AllAuthoritiesCaption }.Concat(configurations).ToArray();
-            ConfigurationBox.Text = ConfigurationCaption(current);
+            var previous = restoringView;
+            restoringView = true;
+            try
+            {
+                configurations = CaDirectory.Configurations(discovered.Concat(configurations));
+                ConfigurationBox.ItemsSource = new[] { AllAuthoritiesCaption }.Concat(configurations).ToArray();
+                ConfigurationBox.Text = ConfigurationCaption(current);
+            }
+            finally { restoringView = previous; }
         }
 
         private async Task DiscoverAuthorities(bool showBusy = true)
@@ -1042,7 +1108,7 @@ namespace Certitude
                 var authorities = await Task.Run(() => CaDirectory.Discover());
                 UpdateAuthorities(authorities);
                 if (StatusText.Text == status)
-                    StatusText.Text = $"Found {authorities.Count:N0} Certificate Authorities. Select A CA And Connect.";
+                    StatusText.Text = $"Found {authorities.Count:N0} Certificate Authorities. Select A CA To Connect.";
             }
             catch (Exception error) { Record("CA discovery: " + CaAdministration.Error(error)); }
             finally

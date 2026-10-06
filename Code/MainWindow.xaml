@@ -60,6 +60,7 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="DiscoverButton" DockPanel.Dock="Right" Content="_Find CAs" Click="DiscoverClick" Margin="5,0,0,0"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
             <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False" Width="360"
+                      SelectionChanged="ConfigurationSelected"
                       AutomationProperties.LabeledBy="{Binding ElementName=ConfigurationLabel}"
                       ToolTip="Select All Certificate Authorities to search every listed authority, select one CA, or enter SERVER\CA Name.">
               <ComboBox.ItemTemplate>
@@ -203,20 +204,43 @@ Licensed under GPLv3. See LICENSE.md.
                   <ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel Margin="0,0,6,0" VerticalAlignment="Bottom">
-                  <Label x:Name="SearchFieldLabel" Content="Search Field" Style="{StaticResource FieldLabelStyle}"
+                  <Label x:Name="SearchFieldLabel" Content="Search Fields" Style="{StaticResource FieldLabelStyle}"
                          FontSize="11" Margin="0,0,0,2"
                          Target="{Binding ElementName=SearchField}"
                          local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
-                  <ComboBox x:Name="SearchField" SelectedIndex="0" SelectionChanged="FilterChanged"
-                            AutomationProperties.LabeledBy="{Binding ElementName=SearchFieldLabel}">
-                    <ComboBoxItem Content="All Fields" Tag="All" />
-                    <ComboBoxItem Content="Common Name" Tag="CommonName" />
-                    <ComboBoxItem Content="Requester" Tag="RequesterName" />
-                    <ComboBoxItem Content="Template Name / OID" Tag="CertificateTemplate" />
-                    <ComboBoxItem Content="Serial Number" Tag="SerialNumber" />
-                    <ComboBoxItem Content="Request ID" Tag="RequestID" />
-                    <ComboBoxItem Content="Certificate Authority" Tag="Configuration" />
-                  </ComboBox>
+                  <Grid>
+                    <ToggleButton x:Name="SearchField" MinHeight="26" Padding="6,3"
+                                  PreviewKeyDown="SearchFieldKeyDown"
+                                  HorizontalContentAlignment="Stretch" Template="{StaticResource ButtonChrome}"
+                                  Background="{DynamicResource Surface}" Foreground="{DynamicResource Ink}"
+                                  BorderBrush="{DynamicResource Border}" BorderThickness="1"
+                                  AutomationProperties.LabeledBy="{Binding ElementName=SearchFieldLabel}">
+                      <DockPanel>
+                        <TextBlock DockPanel.Dock="Right" Text="▾" Margin="6,0,0,0" />
+                        <TextBlock x:Name="SearchFieldCaption" Text="Common Name" TextTrimming="CharacterEllipsis" />
+                      </DockPanel>
+                    </ToggleButton>
+                    <Popup Placement="Bottom" PlacementTarget="{Binding ElementName=SearchField}" StaysOpen="False"
+                           Opened="SearchFieldOpened"
+                           IsOpen="{Binding IsChecked, ElementName=SearchField, Mode=TwoWay}">
+                      <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
+                              BorderThickness="1" Padding="8,4" MinWidth="205">
+                        <StackPanel x:Name="SearchFieldOptions" KeyboardNavigation.DirectionalNavigation="Cycle"
+                                    PreviewKeyDown="SearchFieldKeyDown">
+                          <CheckBox Content="Common Name" Tag="CommonName" IsChecked="True"
+                                    Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="Requester" Tag="RequesterName" Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="Template Name / OID" Tag="CertificateTemplate"
+                                    Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="Serial Number" Tag="SerialNumber" Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="Request ID" Tag="RequestID" Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="Certificate Authority" Tag="Configuration"
+                                    Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="Status" Tag="Status" Margin="0,4" Click="SearchFieldClick" />
+                        </StackPanel>
+                      </Border>
+                    </Popup>
+                  </Grid>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Margin="0,0,6,0" VerticalAlignment="Bottom">
                   <Label x:Name="MatchLabel" Content="Match" Style="{StaticResource FieldLabelStyle}"

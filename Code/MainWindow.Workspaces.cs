@@ -51,6 +51,7 @@ namespace Certitude
             TimeDisplay.Label(ExpiresBefore, ToolTipProperty, "UTC Date / Time: yyyy-MM-dd [HH:mm:ss [offset]]");
             configurations = savedWorkspace.Authorities.ToArray();
             RestoreViewControls(savedWorkspace.Current);
+            RestoreSearchFields(savedWorkspace.SearchFields);
             if (ConfigurationBox.Text.Length == 0)
             {
                 try { ConfigurationBox.Text = CertificateStore.LocalConfiguration(); }
@@ -110,6 +111,7 @@ namespace Certitude
                     savedWorkspace.Current.AutoAuthorityColumn = autoAuthorityColumn;
                 }
                 savedWorkspace.UseUtc = TimeDisplay.Current.UseUtc;
+                savedWorkspace.SearchFields = ReadSearchFields();
                 savedWorkspace.Authorities = CaDirectory.Configurations(configurations).ToList();
                 savedWorkspace.Save(BrowserWorkspace.DefaultPath);
                 WorkspaceWarning("");
@@ -150,8 +152,7 @@ namespace Certitude
                 // Restore the category, search and date controls using their persisted identities.
                 Views.SelectedItem = Views.Items.Cast<ListBoxItem>().Single(item =>
                     Convert.ToString(item.Tag) == Convert.ToString(filter.Disposition, CultureInfo.InvariantCulture));
-                SearchField.SelectedItem = SearchField.Items.Cast<ComboBoxItem>().Single(item =>
-                    Convert.ToString(item.Tag) == filter.Field);
+                RestoreSearchFields(filter.Fields);
                 SearchBox.Text = filter.Value;
                 MatchMode.SelectedIndex = (int)filter.Match;
                 ExpiresFrom.Text = TimeDisplay.Entry(filter.ExpiresFrom);

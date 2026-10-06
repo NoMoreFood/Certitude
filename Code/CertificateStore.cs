@@ -127,7 +127,13 @@ namespace Certitude
     public sealed class QuerySpec
     {
         public int? Disposition { get; set; } = 20;
-        public string Field { get; set; } = "CommonName";
+        public string[] Fields { get; set; } = new[] { "CommonName" };
+        public string Field
+        {
+            get => Fields?.Length == 1 ? Fields[0] : null;
+            set => Fields = value == "All" ? CertificateStore.SearchFields.ToArray() : new[] { value };
+        }
+        public bool ShouldSerializeField() => false;
         public string Value { get; set; } = "";
         public SearchMatch Match { get; set; } = SearchMatch.Exact;
         public DateTime? ExpiresFrom { get; set; }
@@ -137,17 +143,21 @@ namespace Certitude
         public int? ExactId => Field == "RequestID" && Match == SearchMatch.Exact && Value.Length > 0 ?
             (int?)int.Parse(Value) : null;
         public bool UsesClientSearch => Value.Length > 0 &&
-            (Field == "All" || Field == "Configuration" || Match != SearchMatch.Exact);
+            (Fields.Length != 1 || Field is "Configuration" or "Status" || Match != SearchMatch.Exact);
 
         internal bool SameFilter(QuerySpec other) => other != null && Disposition == other.Disposition &&
-            Field == other.Field && Value == other.Value && Match == other.Match &&
+            Fields.Length == other.Fields.Length && Fields.All(other.Fields.Contains) &&
+            Value == other.Value && Match == other.Match &&
             ExpiresFrom == other.ExpiresFrom && ExpiresBefore == other.ExpiresBefore;
 
         public void Validate()
         {
             // Reject unsupported filters and invalid bounds before opening a CA query.
             if (PageSize is < 1 or > 25000) throw new ArgumentException("Page size must be 1–25,000.");
-            if (!CertificateStore.SearchFields.Contains(Field)) throw new ArgumentException("Unknown search field.");
+            if (Fields == null || Fields.Length == 0 || Fields.Length > CertificateStore.SearchFields.Length ||
+                Fields.Any(field => !CertificateStore.SearchFields.Contains(field)) ||
+                Fields.Distinct().Count() != Fields.Length)
+                throw new ArgumentException("Select one or more search fields.");
             if (!Enum.IsDefined(typeof(SearchMatch), Match)) throw new ArgumentException("Unknown search match mode.");
             if (Field == "RequestID" && Match == SearchMatch.Exact && Value.Length > 0 &&
                 (!int.TryParse(Value, out var id) || id < 1))
@@ -165,17 +175,23 @@ namespace Certitude
             if (Value.Length == 0) return true;
             if (ExactId.HasValue) return row.RequestId == ExactId.Value;
 
-            // Match the selected field, including the resolved identities of templates.
-            if (Field == "All")
-                return MatchesText(row.CommonName) || MatchesText(row.Requester) || MatchesTemplate(row) ||
-                    MatchesText(row.SerialNumber) || MatchesText(row.Status) || MatchesText(row.Configuration) ||
-                    MatchesText(row.RequestId.ToString(CultureInfo.InvariantCulture));
-            if (Field == "Configuration") return MatchesText(row.Configuration);
-            if (Field == "CertificateTemplate") return MatchesTemplate(row);
-            var actual = Field == "RequestID" ? row.RequestId.ToString(CultureInfo.InvariantCulture) :
-                Field == "CommonName" ? row.CommonName : Field == "RequesterName" ? row.Requester :
-                row.SerialNumber;
-            return MatchesText(actual);
+            // Match any selected field, including the resolved identities of templates.
+            foreach (var field in Fields)
+            {
+                var matches = field switch
+                {
+                    "CommonName" => MatchesText(row.CommonName),
+                    "RequesterName" => MatchesText(row.Requester),
+                    "CertificateTemplate" => MatchesTemplate(row),
+                    "SerialNumber" => MatchesText(row.SerialNumber),
+                    "RequestID" => MatchesText(row.RequestId.ToString(CultureInfo.InvariantCulture)),
+                    "Configuration" => MatchesText(row.Configuration),
+                    "Status" => MatchesText(row.Status),
+                    _ => false
+                };
+                if (matches) return true;
+            }
+            return false;
         }
 
         internal bool MatchesTemplate(CertificateRow row) => MatchesText(row.Template) ||
@@ -222,7 +238,9 @@ namespace Certitude
     public class CertificateStore
     {
         public static readonly string[] SearchFields =
-            { "All", "CommonName", "RequesterName", "CertificateTemplate", "SerialNumber", "RequestID", "Configuration" };
+        {
+            "CommonName", "RequesterName", "CertificateTemplate", "SerialNumber", "RequestID", "Configuration", "Status"
+        };
         private static readonly string[] Columns =
         {
             "RequestID", "CommonName", "RequesterName", "CertificateTemplate", "SerialNumber",
@@ -371,7 +389,7 @@ namespace Certitude
                 !HasRows("Request.Disposition", query.Disposition.Value, token)) yield break;
 
             // Load directory names before the query only when template labels participate in filtering.
-            var names = query.Value.Length > 0 && (query.Field == "All" || query.Field == "CertificateTemplate") ?
+            var names = query.Value.Length > 0 && query.Fields.Contains("CertificateTemplate") ?
                 Oids : null;
             token.ThrowIfCancellationRequested();
 
@@ -384,11 +402,11 @@ namespace Certitude
                 var required = new HashSet<string>(selected.SelectMany(field => field.Columns)) { "RequestID" };
                 if (query.Disposition.HasValue) required.Add("Request.Disposition");
                 if (query.ExpiresFrom.HasValue || query.ExpiresBefore.HasValue) required.Add("NotAfter");
-                if (query.Value.Length > 0 && query.Field != "Configuration")
+                if (query.Value.Length > 0)
                 {
-                    if (query.Field == "All") required.UnionWith(new[] { "CommonName", "RequesterName",
-                        "CertificateTemplate", "SerialNumber", "NotAfter", "Request.Disposition" });
-                    else required.Add(query.Field);
+                    required.UnionWith(query.Fields.Where(field => field is not ("Configuration" or "Status")));
+                    if (query.Fields.Contains("Status"))
+                        required.UnionWith(new[] { "NotAfter", "Request.Disposition" });
                 }
                 resultColumns = Columns.Where(required.Contains).ToArray();
                 resolveTemplates = names != null || selected.Any(field =>
@@ -397,7 +415,7 @@ namespace Certitude
 
             // Parallelize client-side scans unless the CA name alone already matches every candidate.
             if (query.UsesClientSearch && query.Field != "Configuration" &&
-                (query.Field != "All" || !query.MatchesText(Configuration)))
+                (!query.Fields.Contains("Configuration") || !query.MatchesText(Configuration)))
             {
                 foreach (var row in ReadScanRows(query, before, token, names, resultColumns, resolveTemplates))
                     yield return row;
