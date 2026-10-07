@@ -463,6 +463,30 @@ namespace Certitude
             return string.Join(Environment.NewLine, values.Distinct().Select(value => Describe(value)));
         }
 
+        internal static string[] DnsNames(byte[] encoded)
+        {
+            // Decode individual DNS identities independently of localized extension formatting.
+            var position = 0;
+            if (ReadElement(encoded, ref position, encoded.Length, out var end) != 48 || end != encoded.Length)
+                throw new CryptographicException("Invalid subject alternative names.");
+            var names = new List<string>();
+            while (position < end)
+            {
+                var tag = ReadElement(encoded, ref position, end, out var finish);
+                if (tag == 130)
+                {
+                    // DNS entries are nonempty IA5 strings; other GeneralName types are skipped.
+                    if (position == finish) throw new CryptographicException("Empty DNS name.");
+                    for (var i = position; i < finish; i++)
+                        if (encoded[i] < 33 || encoded[i] > 126)
+                            throw new CryptographicException("Invalid DNS name.");
+                    names.Add(Encoding.ASCII.GetString(encoded, position, finish - position));
+                }
+                position = finish;
+            }
+            return names.ToArray();
+        }
+
         private static int ReadElement(byte[] bytes, ref int position, int end, out int valueEnd)
         {
             // Read the DER tag, including any extended tag-number bytes.

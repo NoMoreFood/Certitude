@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -93,6 +94,7 @@ namespace Certitude
         public string Configuration { get; set; }
         public int RequestId { get; set; }
         public string CommonName { get; set; }
+        public string[] DnsNames { get; set; }
         public string Requester { get; set; }
         public string Template { get; set; }
         internal TemplateIdentity ResolvedTemplate { get; set; }
@@ -143,7 +145,8 @@ namespace Certitude
         public int? ExactId => Field == "RequestID" && Match == SearchMatch.Exact && Value.Length > 0 ?
             (int?)int.Parse(Value) : null;
         public bool UsesClientSearch => Value.Length > 0 &&
-            (Fields.Length != 1 || Field is "Configuration" or "Status" || Match != SearchMatch.Exact);
+            (Fields.Length != 1 || Field is "Configuration" or "Status" or "SubjectAlternativeName" ||
+                Match != SearchMatch.Exact);
 
         internal bool SameFilter(QuerySpec other) => other != null && Disposition == other.Disposition &&
             Fields.Length == other.Fields.Length && Fields.All(other.Fields.Contains) &&
@@ -181,6 +184,7 @@ namespace Certitude
                 var matches = field switch
                 {
                     "CommonName" => MatchesText(row.CommonName),
+                    "SubjectAlternativeName" => row.DnsNames?.Any(MatchesText) == true,
                     "RequesterName" => MatchesText(row.Requester),
                     "CertificateTemplate" => MatchesTemplate(row),
                     "SerialNumber" => MatchesText(row.SerialNumber),
@@ -239,7 +243,8 @@ namespace Certitude
     {
         public static readonly string[] SearchFields =
         {
-            "CommonName", "RequesterName", "CertificateTemplate", "SerialNumber", "RequestID", "Configuration", "Status"
+            "CommonName", "SubjectAlternativeName", "RequesterName", "CertificateTemplate", "SerialNumber",
+            "RequestID", "Configuration", "Status"
         };
         private static readonly string[] Columns =
         {
@@ -404,7 +409,8 @@ namespace Certitude
                 if (query.ExpiresFrom.HasValue || query.ExpiresBefore.HasValue) required.Add("NotAfter");
                 if (query.Value.Length > 0)
                 {
-                    required.UnionWith(query.Fields.Where(field => field is not ("Configuration" or "Status")));
+                    required.UnionWith(query.Fields.Where(field =>
+                        field is not ("Configuration" or "Status" or "SubjectAlternativeName")));
                     if (query.Fields.Contains("Status"))
                         required.UnionWith(new[] { "NotAfter", "Request.Disposition" });
                 }
@@ -582,6 +588,7 @@ namespace Certitude
                 {
                     var ordinals = new Dictionary<int, int>();
                     var searchColumn = query.UsesClientSearch ? Array.IndexOf(Columns, query.Field) : -1;
+                    var searchSans = query.Value.Length > 0 && query.Fields.Contains("SubjectAlternativeName");
                     for (var read = 0; read < maximumRows; read++)
                     {
                         // Read one request at a time while keeping cancellation responsive.
@@ -644,7 +651,11 @@ namespace Certitude
                         token.ThrowIfCancellationRequested();
                         if (row.RequestId < 1)
                             throw new InvalidOperationException("The CA returned no request ID for a row.");
-                        if (rejected || !query.Matches(row)) continue;
+                        if (rejected) continue;
+
+                        // Read the SAN extension only when DNS names participate in a nonempty search.
+                        if (searchSans) row.DnsNames = ReadDnsNames(rows.Value, token);
+                        if (!query.Matches(row)) continue;
 
                         // Resolve display labels only for matching rows when the search does not need them.
                         if (resolveTemplates)
@@ -657,6 +668,28 @@ namespace Certitude
                     }
                 }
             }
+        }
+
+        private static string[] ReadDnsNames(ICertViewRow row, CancellationToken token)
+        {
+            // Enumerate the current request's extensions without retrieving the certificate blob.
+            token.ThrowIfCancellationRequested();
+            using var extensions = new ComScope<ICertViewExtension>(row.EnumCertViewExtension(0));
+            while (extensions.Value.Next() >= 0)
+            {
+                token.ThrowIfCancellationRequested();
+                if (extensions.Value.GetName() != "2.5.29.17" || (extensions.Value.GetFlags() & 2) != 0) continue;
+
+                // Malformed SAN data cannot match, while CA access failures still propagate to the caller.
+                try
+                {
+                    var encoded = Format(extensions.Value.GetValue(3, 1));
+                    return OidNames.DnsNames(Convert.FromBase64String(encoded));
+                }
+                catch (Exception error) when (error is FormatException or CryptographicException)
+                { return Array.Empty<string>(); }
+            }
+            return Array.Empty<string>();
         }
 
         internal static void Restrict(ICertView view, string name, int seek, object value, int sort = 0)

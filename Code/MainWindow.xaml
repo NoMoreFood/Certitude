@@ -229,6 +229,9 @@ Licensed under GPLv3. See LICENSE.md.
                                     PreviewKeyDown="SearchFieldKeyDown">
                           <CheckBox Content="Common Name" Tag="CommonName" IsChecked="True"
                                     Margin="0,4" Click="SearchFieldClick" />
+                          <CheckBox Content="SAN DNS Names" Tag="SubjectAlternativeName"
+                                    ToolTip="Search each DNS name in the Subject Alternative Name extension."
+                                    Margin="0,4" Click="SearchFieldClick" />
                           <CheckBox Content="Requester" Tag="RequesterName" Margin="0,4" Click="SearchFieldClick" />
                           <CheckBox Content="Template Name / OID" Tag="CertificateTemplate"
                                     Margin="0,4" Click="SearchFieldClick" />

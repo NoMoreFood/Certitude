@@ -217,7 +217,8 @@ namespace Certitude
                 UpdateControls();
                 StatusText.Text = !native ? "Sorting all matching CA records…" : spec.UsesClientSearch ?
                     "Searching matching CA records…" : "Loading certificate metadata…";
-                SearchHint.Text = spec.UsesClientSearch ?
+                SearchHint.Text = spec.Value.Length > 0 && spec.Fields.Contains("SubjectAlternativeName") ?
+                    "Searching all matching records for DNS SANs. Large CAs may take longer." : spec.UsesClientSearch ?
                     "Searching the full matching view. Exact searches on one field are faster on large CAs." :
                     "Loading results for the current filters…";
                 try
