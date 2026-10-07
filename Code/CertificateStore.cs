@@ -144,7 +144,10 @@ namespace Certitude
 
         public int? ExactId => Field == "RequestID" && Match == SearchMatch.Exact && Value.Length > 0 ?
             (int?)int.Parse(Value) : null;
-        public bool UsesClientSearch => Value.Length > 0 &&
+        internal bool UsesIndexedFields => Match == SearchMatch.Exact && Value.Length > 0 && Fields.Length > 1 &&
+            Fields.All(name => name is "CommonName" or "RequesterName" or "CertificateTemplate" or
+                "SerialNumber" or "RequestID" or "Configuration");
+        public bool UsesClientSearch => Value.Length > 0 && !UsesIndexedFields &&
             (Fields.Length != 1 || Field is "Configuration" or "Status" or "SubjectAlternativeName" ||
                 Match != SearchMatch.Exact);
 
@@ -303,17 +306,35 @@ namespace Certitude
             CancellationToken token) => ReadPage(query, before?.RequestId, token);
 
         public CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token)
+            => ReadPage(query, before, token, null);
+
+        private CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token, string[] fields)
         {
             // Validate the query before selecting the paging strategy.
             query.Validate();
+            token.ThrowIfCancellationRequested();
             var page = new CertificatePage();
+            if (query.UsesIndexedFields)
+            {
+                // Merge indexed field pages while retaining global newest-first order and distinct request IDs.
+                var records = new Dictionary<int, CertificateRow>();
+                foreach (var branch in ExactFieldQueries(query))
+                {
+                    var result = ReadPage(branch, before, token, fields);
+                    page.HasMore |= result.HasMore;
+                    foreach (var row in result.Rows) records[row.RequestId] = row;
+                }
+                page.HasMore |= records.Count > query.PageSize;
+                page.Rows.AddRange(records.Values.OrderByDescending(row => row.RequestId).Take(query.PageSize));
+                return page;
+            }
             if (query.Match == SearchMatch.Exact && query.Value.Length > 0 &&
                 (query.Field == "CommonName" || query.Field == "SerialNumber"))
             {
                 // Let the CA use the selective field index instead of forcing a scan in RequestID order.
                 var newest = new SortedSet<CertificateRow>(Comparer<CertificateRow>.Create(
                     (left, right) => CompareNewest(right, left)));
-                foreach (var row in ReadRows(query, before, token, false))
+                foreach (var row in ReadRows(query, before, token, false, fields))
                 {
                     newest.Add(row);
                     if (newest.Count > query.PageSize + 1) newest.Remove(newest.Min);
@@ -324,7 +345,7 @@ namespace Certitude
                 return page;
             }
             // Stop the ordered stream after collecting one page and detecting overflow.
-            foreach (var row in ReadRows(query, before, token))
+            foreach (var row in ReadRows(query, before, token, true, fields))
             {
                 if (page.Rows.Count == query.PageSize)
                 {
@@ -334,6 +355,41 @@ namespace Certitude
                 page.Rows.Add(row);
             }
             return page;
+        }
+
+        private IEnumerable<QuerySpec> ExactFieldQueries(QuerySpec query)
+        {
+            // A matching CA name covers every candidate, so additional OR branches cannot add records.
+            var fields = query.Fields.Contains("Configuration") && query.MatchesText(Configuration) ?
+                new[] { "Configuration" } : query.Fields;
+            foreach (var field in fields)
+            {
+                // Text matching of IDs and serials cannot accept the native API's broader input conversions.
+                if (field == "RequestID" && (!int.TryParse(query.Value, NumberStyles.None,
+                    CultureInfo.InvariantCulture, out var id) || id < 1 ||
+                    id.ToString(CultureInfo.InvariantCulture) != query.Value)) continue;
+                if (field == "SerialNumber" && (query.Value.Length % 2 != 0 ||
+                    query.Value.Any(value => !Uri.IsHexDigit(value)))) continue;
+                yield return new QuerySpec
+                {
+                    Fields = new[] { field }, Value = query.Value, Match = SearchMatch.Exact,
+                    Disposition = query.Disposition, ExpiresFrom = query.ExpiresFrom,
+                    ExpiresBefore = query.ExpiresBefore, PageSize = query.PageSize
+                };
+            }
+        }
+
+        private IEnumerable<CertificateRow> ReadFieldPages(QuerySpec query, int? before,
+            CancellationToken token, string[] fields)
+        {
+            // Page selective indexes without forcing them to scan the CA in request-ID order.
+            while (true)
+            {
+                var page = ReadPage(query, before, token, fields);
+                foreach (var row in page.Rows) yield return row;
+                if (!page.HasMore) yield break;
+                before = page.Rows.Last().RequestId;
+            }
         }
 
         internal static int CompareNewest(CertificateRow left, CertificateRow right)
@@ -386,6 +442,40 @@ namespace Certitude
             // Reject impossible cursor ranges before preparing the matching row streams.
             query.Validate();
             token.ThrowIfCancellationRequested();
+            if (query.UsesIndexedFields)
+            {
+                // Stream each indexed branch directly for exports and client sorting, or merge ordered pages.
+                var branches = ExactFieldQueries(query).ToArray();
+                if (!ordered)
+                {
+                    var seen = new HashSet<int>();
+                    foreach (var branch in branches)
+                        foreach (var row in ReadRows(branch, before, token, false, fields))
+                            if (seen.Add(row.RequestId)) yield return row;
+                    yield break;
+                }
+                var fieldStreams = branches.Select(branch =>
+                    ReadFieldPages(branch, before, token, fields).GetEnumerator()).ToArray();
+                try
+                {
+                    var active = fieldStreams.Select(stream => stream.MoveNext()).ToArray();
+                    while (true)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        var next = -1;
+                        for (var i = 0; i < fieldStreams.Length; i++)
+                            if (active[i] && (next < 0 ||
+                                fieldStreams[i].Current.RequestId > fieldStreams[next].Current.RequestId)) next = i;
+                        if (next < 0) yield break;
+                        var row = fieldStreams[next].Current;
+                        yield return row;
+                        for (var i = 0; i < fieldStreams.Length; i++)
+                            if (active[i] && fieldStreams[i].Current.RequestId == row.RequestId)
+                                active[i] = fieldStreams[i].MoveNext();
+                    }
+                }
+                finally { foreach (var stream in fieldStreams) stream.Dispose(); }
+            }
             if (query.ExactId.HasValue && before.HasValue && query.ExactId.Value >= before.Value) yield break;
             if (query.Field == "Configuration" && query.Value.Length > 0 && !query.MatchesText(Configuration)) yield break;
 
@@ -486,8 +576,24 @@ namespace Certitude
             return found;
         }
 
+        internal virtual IEnumerable<CertificateRow> ReadRowsForSort(QuerySpec query, CancellationToken token)
+        {
+            // Preserve selective field and date indexes when collecting the complete matching set.
+            query.Validate();
+            token.ThrowIfCancellationRequested();
+            if (IsAllAuthorities || query.Value.Length > 0 ||
+                query.ExpiresFrom.HasValue || query.ExpiresBefore.HasValue)
+                return ReadRows(query, null, token, false);
+            if (query.Disposition.HasValue && !HasRows("Request.Disposition", query.Disposition.Value, token))
+                return Enumerable.Empty<CertificateRow>();
+
+            // Broad snapshots can collect primary-key ranges concurrently because the final sort defines order.
+            return ReadScanRows(query, null, token, null, Columns, true, false);
+        }
+
         private IEnumerable<CertificateRow> ReadScanRows(QuerySpec query, int? before,
-            CancellationToken token, OidNames names, string[] resultColumns, bool resolveTemplates)
+            CancellationToken token, OidNames names, string[] resultColumns,
+            bool resolveTemplates, bool ordered = true)
         {
             // Limit one expensive scan per CA so concurrent callers cannot multiply its four readers.
             var gate = scanGates.GetOrAdd(Configuration, _ => new SemaphoreSlim(1, 1));
@@ -498,55 +604,73 @@ namespace Certitude
                 var budget = Math.Max(4096, query.PageSize + 1);
                 var scanned = 0;
                 var cursor = 0;
+                var first = 0;
+                var matched = 0;
                 foreach (var row in ReadRowsCore(query, before, token, true, names, null,
                     resultColumns, resolveTemplates, 1, budget, id =>
                 {
+                    if (scanned == 0) first = id;
                     scanned++;
                     cursor = id;
-                })) yield return row;
+                }))
+                {
+                    matched++;
+                    yield return row;
+                }
                 if (scanned < budget || cursor <= 1) yield break;
 
-                // Split the remaining ID range without placing two restrictions on the sorted column.
+                // Keep page scans near their cursor; unordered snapshots can drain larger ranges concurrently.
                 const int readers = 4;
-                var width = (cursor - 1L + readers - 1) / readers;
-                using (var request = CancellationTokenSource.CreateLinkedTokenSource(token))
+                var width = ordered ? Math.Min(262144, Math.Max(16384, (first - (long)cursor + 1) *
+                    Math.Max(1, query.PageSize + 1 - matched) / Math.Max(1, matched) / readers)) :
+                    (cursor - 1L + readers - 1) / readers;
+                while (cursor > 1)
                 {
-                    var buffers = Enumerable.Range(0, readers)
-                        .Select(_ => new BlockingCollection<CertificateRow>(256)).ToArray();
-                    var workers = Enumerable.Range(0, readers).Select(partition => Task.Factory.StartNew(() =>
+                    using (var request = CancellationTokenSource.CreateLinkedTokenSource(token))
                     {
-                        var upper = (int)Math.Max(1, cursor - partition * width);
-                        var lower = (int)Math.Max(1, cursor - (partition + 1) * width);
+                        var buffers = Enumerable.Range(0, ordered ? readers : 1)
+                            .Select(_ => new BlockingCollection<CertificateRow>(256)).ToArray();
+                        var remaining = readers;
+                        var workers = Enumerable.Range(0, readers).Select(partition => Task.Factory.StartNew(() =>
+                        {
+                            var upper = (int)Math.Max(1, cursor - partition * width);
+                            var lower = (int)Math.Max(1, cursor - (partition + 1) * width);
+                            try
+                            {
+                                // Each worker owns its COM objects and stops before entering the next range.
+                                if (upper <= lower) return;
+                                foreach (var row in ReadRowsCore(query, upper, request.Token, true, names,
+                                    null, resultColumns, resolveTemplates, lower))
+                                    buffers[ordered ? partition : 0].Add(row, request.Token);
+                            }
+                            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+                            catch
+                            {
+                                request.Cancel();
+                                throw;
+                            }
+                            finally
+                            {
+                                if (ordered || Interlocked.Decrement(ref remaining) == 0)
+                                    buffers[ordered ? partition : 0].CompleteAdding();
+                            }
+                        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
                         try
                         {
-                            // Each worker owns its COM objects and stops before entering the next range.
-                            if (upper <= lower) return;
-                            foreach (var row in ReadRowsCore(query, upper, request.Token, true, names,
-                                null, resultColumns, resolveTemplates, lower))
-                                buffers[partition].Add(row, request.Token);
+                            // Ordered pages consume adjacent ranges in sequence; snapshots consume any ready row.
+                            foreach (var buffer in buffers)
+                                foreach (var row in buffer.GetConsumingEnumerable(request.Token)) yield return row;
+                            token.ThrowIfCancellationRequested();
                         }
-                        catch (OperationCanceledException) when (request.IsCancellationRequested) { }
-                        catch
+                        finally
                         {
+                            // Early page completion and faults must stop and join every producer before returning.
                             request.Cancel();
-                            throw;
+                            try { Task.WhenAll(workers).GetAwaiter().GetResult(); }
+                            finally { foreach (var buffer in buffers) buffer.Dispose(); }
                         }
-                        finally { buffers[partition].CompleteAdding(); }
-                    }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
-                    try
-                    {
-                        // Disjoint descending ranges can be consumed in order without waiting for all heads.
-                        foreach (var buffer in buffers)
-                            foreach (var row in buffer.GetConsumingEnumerable(request.Token)) yield return row;
-                        token.ThrowIfCancellationRequested();
                     }
-                    finally
-                    {
-                        // Early page completion and faults must stop and join every producer before returning.
-                        request.Cancel();
-                        try { Task.WhenAll(workers).GetAwaiter().GetResult(); }
-                        finally { foreach (var buffer in buffers) buffer.Dispose(); }
-                    }
+                    cursor = (int)Math.Max(1, cursor - width * readers);
                 }
             }
             finally { gate.Release(); }

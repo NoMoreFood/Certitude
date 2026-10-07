@@ -236,7 +236,7 @@ namespace Certitude
                             // Use native paging or sort the complete matching set before slicing the requested page.
                             if (native) return source.ReadBrowserPage(spec, before, token);
                             if (!cached) rows = CertificateStore.SortRows(rows ??
-                                source.ReadRows(spec, null, token, false), field, direction, token);
+                                source.ReadRowsForSort(spec, token), field, direction, token);
                             var offset = checked(targetPage * spec.PageSize);
                             var sortedPage = new CertificatePage { HasMore = rows.Length - offset > spec.PageSize };
                             for (var i = offset; i < Math.Min(rows.Length, offset + spec.PageSize); i++)
