@@ -226,73 +226,42 @@ namespace Certitude
 
         private static IEnumerable<StatisticsRecord> ReadRecords(string configuration, CancellationToken token, OidNames oids)
         {
-            // Select only fields needed for statistics instead of fetching certificate blobs.
+            // Stream the statistics projection in bounded metadata batches without fetching certificate blobs.
             var names = new[] { "RequestID", "CertificateTemplate", "Request.RequesterName", "NotBefore", "NotAfter",
                 "Request.Disposition", "Request.RevokedReason", "Request.SubmittedWhen", "Request.ResolvedWhen",
                 "Request.RequestType" };
-            using (var scope = ComScope<ICertView>.Create("CertificateAuthority.View"))
+            var restrictions = new[] { new DatabaseRestriction("RequestID", 16, 0) };
+            foreach (var data in CaDatabase.Read(configuration, names, restrictions, token))
             {
-                // Open a CA view that streams metadata for every request.
-                var view = scope.Value;
-                view.OpenConnection(configuration);
-                var indexes = names.Select(name => view.GetColumnIndex(0, name)).ToArray();
-                view.SetResultColumnCount(indexes.Length);
-                foreach (var index in indexes) view.SetResultColumn(index);
-                CertificateStore.Restrict(view, "RequestID", 16, 0);
-                using (var rows = new ComScope<ICertViewRow>(view.OpenView()))
+                var row = new CertificateRow();
+                var record = new StatisticsRecord { Certificate = row };
+                for (var ordinal = 0; ordinal < data.Values.Length; ordinal++)
                 {
-                    var ordinals = new Dictionary<int, int>();
-                    while (true)
-                    {
-                        // Create one aggregate input record at a time with cancellation support.
-                        token.ThrowIfCancellationRequested();
-                        if (rows.Value.Next() < 0) yield break;
-                        var row = new CertificateRow();
-                        var record = new StatisticsRecord { Certificate = row };
-                        using (var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn()))
-                        {
-                            int index;
-                            while ((index = columns.Value.Next()) >= 0)
-                            {
-                                // Cache native column mappings across the statistics scan.
-                                if (!ordinals.TryGetValue(index, out var ordinal))
-                                {
-                                    var name = columns.Value.GetName();
-                                    ordinal = Array.FindIndex(names, candidate => string.Equals(
-                                        candidate.Replace("Request.", ""), name.Replace("Request.", ""),
-                                        StringComparison.OrdinalIgnoreCase));
-                                    ordinals[index] = ordinal;
-                                }
-                                // Skip missing values and normalize returned dates as UTC.
-                                var value = columns.Value.GetValue(1);
-                                if (value == null || value == DBNull.Value) continue;
-                                var date = value is DateTime time ? (DateTime?)DateTime.SpecifyKind(time,
-                                    DateTimeKind.Utc) : null;
+                    var value = data.Values[ordinal];
+                    if (value == null || value == DBNull.Value) continue;
+                    var date = value is DateTime time ? (DateTime?)DateTime.SpecifyKind(time, DateTimeKind.Utc) : null;
 
-                                // Populate statistics fields and resolve template identities for grouping.
-                                switch (ordinal)
-                                {
-                                    case 0: row.RequestId = Convert.ToInt32(value); break;
-                                    case 1:
-                                        row.Template = Convert.ToString(value);
-                                        row.ResolvedTemplate = oids.Template(row.Template);
-                                        break;
-                                    case 2: row.Requester = Convert.ToString(value); break;
-                                    case 3: row.NotBefore = date; break;
-                                    case 4: row.NotAfter = date; break;
-                                    case 5: row.Disposition = Convert.ToInt32(value); break;
-                                    case 6: row.RevocationReason = Convert.ToInt32(value); break;
-                                    case 7: record.Submitted = date; break;
-                                    case 8: record.Resolved = date; break;
-                                    case 9: record.RequestType = Convert.ToInt32(value); break;
-                                }
-                            }
-                        }
-                        // Reject rows without a request identity before aggregation.
-                        if (row.RequestId < 1) throw new InvalidOperationException("The CA returned no request ID.");
-                        yield return record;
+                    // Retain the exact aggregate inputs and resolved template identities from the CA.
+                    switch (ordinal)
+                    {
+                        case 0: row.RequestId = Convert.ToInt32(value); break;
+                        case 1:
+                            row.Template = Convert.ToString(value);
+                            row.ResolvedTemplate = oids.Template(row.Template);
+                            break;
+                        case 2: row.Requester = Convert.ToString(value); break;
+                        case 3: row.NotBefore = date; break;
+                        case 4: row.NotAfter = date; break;
+                        case 5: row.Disposition = Convert.ToInt32(value); break;
+                        case 6: row.RevocationReason = Convert.ToInt32(value); break;
+                        case 7: record.Submitted = date; break;
+                        case 8: record.Resolved = date; break;
+                        case 9: record.RequestType = Convert.ToInt32(value); break;
                     }
                 }
+                if (row.RequestId < 1) throw new InvalidOperationException("The CA returned no request ID.");
+                token.ThrowIfCancellationRequested();
+                yield return record;
             }
         }
     }

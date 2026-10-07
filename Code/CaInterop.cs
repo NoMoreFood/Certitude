@@ -82,6 +82,59 @@ namespace Certitude
         ICertViewRow OpenView();
     }
 
+    [ComImport, Guid("d594b282-8851-4b61-9c66-3edadf848863"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    internal interface ICertView2
+    {
+        void OpenConnection([MarshalAs(UnmanagedType.BStr)] string config);
+        ICertViewColumn EnumCertViewColumn(int flags);
+        int GetColumnCount(int flags);
+        int GetColumnIndex(int flags, [MarshalAs(UnmanagedType.BStr)] string name);
+        void SetResultColumnCount(int count);
+        void SetResultColumn(int index);
+        void SetRestriction(int index, int seek, int sort, [In, MarshalAs(UnmanagedType.Struct)] ref object value);
+        ICertViewRow OpenView();
+        void SetTable(int table);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CaBlob
+    {
+        internal int Length;
+        internal IntPtr Data;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CaViewRestriction
+    {
+        internal int Column, Seek, Sort;
+        internal IntPtr Value;
+        internal int Length;
+    }
+
+    [ComImport, Guid("d99e6e71-fc88-11d0-b498-00a0c90312f3"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface ICertAdminD
+    {
+        void ReservedSetExtension();
+        void ReservedSetAttributes();
+        void ReservedResubmitRequest();
+        void ReservedDenyRequest();
+        void ReservedIsValidCertificate();
+        void ReservedPublishCRL();
+        void ReservedGetCRL();
+        void ReservedRevokeCertificate();
+        [PreserveSig] int EnumViewColumn([MarshalAs(UnmanagedType.LPWStr)] string authority,
+            int first, int count, out int fetched, out CaBlob columns);
+        void ReservedGetViewDefaultColumnSet();
+        void ReservedEnumAttributesOrExtensions();
+        [PreserveSig] int OpenView([MarshalAs(UnmanagedType.LPWStr)] string authority, int restrictionCount,
+            [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] CaViewRestriction[] restrictions, int columnCount,
+            [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 3)] int[] columns, int first, int count,
+            out int fetched, out CaBlob rows);
+        [PreserveSig] int EnumView([MarshalAs(UnmanagedType.LPWStr)] string authority, int first, int count,
+            out int fetched, out CaBlob rows);
+        [PreserveSig] int CloseView([MarshalAs(UnmanagedType.LPWStr)] string authority);
+    }
+
     [ComImport, Guid("9c735be2-57a5-11d1-9bdb-00c04fb683fa"), InterfaceType(ComInterfaceType.InterfaceIsDual)]
     internal interface ICertViewColumn
     {

@@ -206,8 +206,8 @@ namespace Certitude
             var rows = spec.SameFilter(query) &&
                 cachedUnavailableCount == ((store as AllCertificateStore)?.UnavailableCount ?? 0) ? sortedRows : null;
             var cached = rows != null && field == cachedSortField && direction == cachedSortDirection;
-            var native = rows == null && field == nameof(CertificateRow.RequestId) &&
-                direction == ListSortDirection.Descending;
+            var native = field == nameof(CertificateRow.RequestId);
+            if (native) rows = null;
             using (var request = new CancellationTokenSource())
             {
                 // Track the new load and describe whether it will page, search, or sort all matches.
@@ -234,7 +234,7 @@ namespace Certitude
                         result = await Task.Run(() =>
                         {
                             // Use native paging or sort the complete matching set before slicing the requested page.
-                            if (native) return source.ReadBrowserPage(spec, before, token);
+                            if (native) return source.ReadBrowserPage(spec, before, token, direction);
                             if (!cached) rows = CertificateStore.SortRows(rows ??
                                 source.ReadRowsForSort(spec, token), field, direction, token);
                             var offset = checked(targetPage * spec.PageSize);

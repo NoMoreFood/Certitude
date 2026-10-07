@@ -147,6 +147,19 @@ namespace Certitude
         internal bool UsesIndexedFields => Match == SearchMatch.Exact && Value.Length > 0 && Fields.Length > 1 &&
             Fields.All(name => name is "CommonName" or "RequesterName" or "CertificateTemplate" or
                 "SerialNumber" or "RequestID" or "Configuration");
+        internal string PrefixUpper
+        {
+            get
+            {
+                // Restrict only ASCII prefixes with a safe alphanumeric upper bound; filter candidates exactly.
+                if (Field != "CommonName" || Match != SearchMatch.StartsWith || Value.Length == 0 ||
+                    Value.Any(value => value < 32 || value > 126)) return null;
+                for (var index = Value.Length - 1; index >= 0; index--)
+                    if (Value[index] is >= '0' and < '9' or >= 'a' and < 'z' or >= 'A' and < 'Z')
+                        return Value.Substring(0, index) + (char)(Value[index] + 1);
+                return null;
+            }
+        }
         public bool UsesClientSearch => Value.Length > 0 && !UsesIndexedFields &&
             (Fields.Length != 1 || Field is "Configuration" or "Status" or "SubjectAlternativeName" ||
                 Match != SearchMatch.Exact);
@@ -303,12 +316,14 @@ namespace Certitude
         }
 
         internal virtual CertificatePage ReadBrowserPage(QuerySpec query, CertificateRow before,
-            CancellationToken token) => ReadPage(query, before?.RequestId, token);
+            CancellationToken token, ListSortDirection direction = ListSortDirection.Descending)
+            => ReadPage(query, before?.RequestId, token, null, direction == ListSortDirection.Ascending);
 
         public CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token)
             => ReadPage(query, before, token, null);
 
-        private CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token, string[] fields)
+        private CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token, string[] fields,
+            bool ascending = false)
         {
             // Validate the query before selecting the paging strategy.
             query.Validate();
@@ -320,21 +335,22 @@ namespace Certitude
                 var records = new Dictionary<int, CertificateRow>();
                 foreach (var branch in ExactFieldQueries(query))
                 {
-                    var result = ReadPage(branch, before, token, fields);
+                    var result = ReadPage(branch, before, token, fields, ascending);
                     page.HasMore |= result.HasMore;
                     foreach (var row in result.Rows) records[row.RequestId] = row;
                 }
                 page.HasMore |= records.Count > query.PageSize;
-                page.Rows.AddRange(records.Values.OrderByDescending(row => row.RequestId).Take(query.PageSize));
+                page.Rows.AddRange((ascending ? records.Values.OrderBy(row => row.RequestId) :
+                    records.Values.OrderByDescending(row => row.RequestId)).Take(query.PageSize));
                 return page;
             }
-            if (query.Match == SearchMatch.Exact && query.Value.Length > 0 &&
-                (query.Field == "CommonName" || query.Field == "SerialNumber"))
+            if ((query.Match == SearchMatch.Exact && query.Value.Length > 0 &&
+                (query.Field == "CommonName" || query.Field == "SerialNumber")) || query.PrefixUpper != null)
             {
                 // Let the CA use the selective field index instead of forcing a scan in RequestID order.
                 var newest = new SortedSet<CertificateRow>(Comparer<CertificateRow>.Create(
-                    (left, right) => CompareNewest(right, left)));
-                foreach (var row in ReadRows(query, before, token, false, fields))
+                    (left, right) => ascending ? CompareNewest(left, right) : CompareNewest(right, left)));
+                foreach (var row in ReadRows(query, before, token, false, fields, ascending))
                 {
                     newest.Add(row);
                     if (newest.Count > query.PageSize + 1) newest.Remove(newest.Min);
@@ -345,7 +361,7 @@ namespace Certitude
                 return page;
             }
             // Stop the ordered stream after collecting one page and detecting overflow.
-            foreach (var row in ReadRows(query, before, token, true, fields))
+            foreach (var row in ReadRows(query, before, token, true, fields, ascending))
             {
                 if (page.Rows.Count == query.PageSize)
                 {
@@ -380,22 +396,23 @@ namespace Certitude
         }
 
         private IEnumerable<CertificateRow> ReadFieldPages(QuerySpec query, int? before,
-            CancellationToken token, string[] fields)
+            CancellationToken token, string[] fields, bool ascending = false)
         {
             // Page selective indexes without forcing them to scan the CA in request-ID order.
             while (true)
             {
-                var page = ReadPage(query, before, token, fields);
+                var page = ReadPage(query, before, token, fields, ascending);
                 foreach (var row in page.Rows) yield return row;
                 if (!page.HasMore) yield break;
                 before = page.Rows.Last().RequestId;
             }
         }
 
-        internal static int CompareNewest(CertificateRow left, CertificateRow right)
+        internal static int CompareNewest(CertificateRow left, CertificateRow right, bool ascending = false)
         {
             // Break equal request IDs by CA name to keep combined paging deterministic.
-            var order = right.RequestId.CompareTo(left.RequestId);
+            var order = ascending ? left.RequestId.CompareTo(right.RequestId) :
+                right.RequestId.CompareTo(left.RequestId);
             return order != 0 ? order : StringComparer.OrdinalIgnoreCase.Compare(
                 left.Configuration, right.Configuration);
         }
@@ -437,7 +454,7 @@ namespace Certitude
         }
 
         public virtual IEnumerable<CertificateRow> ReadRows(QuerySpec query, int? before,
-            CancellationToken token, bool ordered = true, string[] fields = null)
+            CancellationToken token, bool ordered = true, string[] fields = null, bool ascending = false)
         {
             // Reject impossible cursor ranges before preparing the matching row streams.
             query.Validate();
@@ -450,12 +467,12 @@ namespace Certitude
                 {
                     var seen = new HashSet<int>();
                     foreach (var branch in branches)
-                        foreach (var row in ReadRows(branch, before, token, false, fields))
+                        foreach (var row in ReadRows(branch, before, token, false, fields, ascending))
                             if (seen.Add(row.RequestId)) yield return row;
                     yield break;
                 }
                 var fieldStreams = branches.Select(branch =>
-                    ReadFieldPages(branch, before, token, fields).GetEnumerator()).ToArray();
+                    ReadFieldPages(branch, before, token, fields, ascending).GetEnumerator()).ToArray();
                 try
                 {
                     var active = fieldStreams.Select(stream => stream.MoveNext()).ToArray();
@@ -465,7 +482,9 @@ namespace Certitude
                         var next = -1;
                         for (var i = 0; i < fieldStreams.Length; i++)
                             if (active[i] && (next < 0 ||
-                                fieldStreams[i].Current.RequestId > fieldStreams[next].Current.RequestId)) next = i;
+                                (ascending ? fieldStreams[i].Current.RequestId < fieldStreams[next].Current.RequestId :
+                                    fieldStreams[i].Current.RequestId > fieldStreams[next].Current.RequestId)))
+                                next = i;
                         if (next < 0) yield break;
                         var row = fieldStreams[next].Current;
                         yield return row;
@@ -476,11 +495,12 @@ namespace Certitude
                 }
                 finally { foreach (var stream in fieldStreams) stream.Dispose(); }
             }
-            if (query.ExactId.HasValue && before.HasValue && query.ExactId.Value >= before.Value) yield break;
+            if (query.ExactId.HasValue && before.HasValue && (ascending ? query.ExactId.Value <= before.Value :
+                query.ExactId.Value >= before.Value)) yield break;
             if (query.Field == "Configuration" && query.Value.Length > 0 && !query.MatchesText(Configuration)) yield break;
 
             // Check the status index before an ordered query can scan every issued certificate for an empty view.
-            if (query.Disposition is 9 or 30 or 31 &&
+            if (query.Disposition is 9 or 21 or 30 or 31 &&
                 !HasRows("Request.Disposition", query.Disposition.Value, token)) yield break;
 
             // Load directory names before the query only when template labels participate in filtering.
@@ -509,8 +529,17 @@ namespace Certitude
                     field.Name.StartsWith("Template", StringComparison.Ordinal));
             }
 
-            // Parallelize client-side scans unless the CA name alone already matches every candidate.
-            if (query.UsesClientSearch && query.Field != "Configuration" &&
+            // Stream broad SAN-only searches from the extensions table and hydrate matching request batches.
+            if (query.Value.Length > 0 && query.Field == "SubjectAlternativeName" &&
+                !query.ExpiresFrom.HasValue && !query.ExpiresBefore.HasValue)
+            {
+                foreach (var row in ReadSanRows(query, before, token, resultColumns, resolveTemplates, ascending))
+                    yield return row;
+                yield break;
+            }
+
+            // Parallelize descending scans while native ascending pages stop at the first matching records.
+            if (!ascending && query.PrefixUpper == null && query.UsesClientSearch && query.Field != "Configuration" &&
                 (!query.Fields.Contains("Configuration") || !query.MatchesText(Configuration)))
             {
                 foreach (var row in ReadScanRows(query, before, token, names, resultColumns, resolveTemplates))
@@ -527,7 +556,7 @@ namespace Certitude
                 query.Field is "RequesterName" or "CertificateTemplate" &&
                 !restrictions.Any(value => HasRows(query.Field, value ?? query.Value, token))) yield break;
             var streams = restrictions.Select(value => ReadRowsCore(query, before, token, ordered, names,
-                value, resultColumns, resolveTemplates).GetEnumerator()).ToArray();
+                value, resultColumns, resolveTemplates, ascending: ascending).GetEnumerator()).ToArray();
             try
             {
                 // Stream directly when no merge of ordered template results is necessary.
@@ -544,7 +573,9 @@ namespace Certitude
                     token.ThrowIfCancellationRequested();
                     var next = -1;
                     for (var i = 0; i < streams.Length; i++)
-                        if (active[i] && (next < 0 || streams[i].Current.RequestId > streams[next].Current.RequestId))
+                        if (active[i] && (next < 0 || (ascending ?
+                            streams[i].Current.RequestId < streams[next].Current.RequestId :
+                            streams[i].Current.RequestId > streams[next].Current.RequestId)))
                             next = i;
                     if (next < 0) yield break;
 
@@ -562,18 +593,8 @@ namespace Certitude
         {
             // Select only a request ID and let the CA choose its field index without an ordering constraint.
             token.ThrowIfCancellationRequested();
-            using var view = ComScope<ICertView>.Create("CertificateAuthority.View");
-            view.Value.OpenConnection(Configuration);
-            view.Value.SetResultColumnCount(1);
-            view.Value.SetResultColumn(view.Value.GetColumnIndex(0, "RequestID"));
-            Restrict(view.Value, field, 1, value);
-
-            // Read one candidate without retrieving certificate metadata or caching an empty result.
-            token.ThrowIfCancellationRequested();
-            using var rows = new ComScope<ICertViewRow>(view.Value.OpenView());
-            var found = rows.Value.Next() >= 0;
-            token.ThrowIfCancellationRequested();
-            return found;
+            return CaDatabase.Read(Configuration, new[] { "RequestID" },
+                new[] { new DatabaseRestriction(field, 1, value) }, token, 1).Any();
         }
 
         internal virtual IEnumerable<CertificateRow> ReadRowsForSort(QuerySpec query, CancellationToken token)
@@ -679,119 +700,187 @@ namespace Certitude
         private IEnumerable<CertificateRow> ReadRowsCore(QuerySpec query, int? before, CancellationToken token,
             bool ordered, OidNames names, string templateRestriction, string[] resultColumns,
             bool resolveTemplates, int minimumId = 1,
-            int maximumRows = int.MaxValue, Action<int> scanned = null)
+            int maximumRows = int.MaxValue, Action<int> scanned = null, bool ascending = false,
+            int maximumId = int.MaxValue)
         {
-            // Open a narrow metadata view to avoid fetching certificate blobs while browsing.
+            // Preserve the selected field index and use one request-ID restriction for ordered cursor paging.
             token.ThrowIfCancellationRequested();
-            using (var scope = ComScope<ICertView>.Create("CertificateAuthority.View"))
+            var restrictions = new List<DatabaseRestriction>();
+            if (query.ExactId.HasValue) restrictions.Add(new DatabaseRestriction("RequestID", 1, query.ExactId.Value));
+            else if (ordered || before.HasValue)
+                restrictions.Add(new DatabaseRestriction("RequestID", ascending ? 16 : before.HasValue ? 2 : 16,
+                    before ?? 0, ordered ? ascending ? 1 : 2 : 0));
+            if (!ordered && (minimumId > 1 || maximumId < int.MaxValue))
             {
-                var view = scope.Value;
-                view.OpenConnection(Configuration);
-                view.SetResultColumnCount(resultColumns.Length);
-                foreach (var name in resultColumns) view.SetResultColumn(view.GetColumnIndex(0, name));
+                // Bound metadata joins on the server without forcing a primary-key sort over sparse dispositions.
+                restrictions.Add(new DatabaseRestriction("RequestID", 8, minimumId));
+                restrictions.Add(new DatabaseRestriction("RequestID", 4, maximumId));
+            }
+            if (query.Disposition.HasValue)
+                restrictions.Add(new DatabaseRestriction("Request.Disposition", 1, query.Disposition.Value));
+            if (query.PrefixUpper is string upper)
+            {
+                // Native ranges narrow candidates; the ordinal prefix predicate remains authoritative.
+                restrictions.Add(new DatabaseRestriction("CommonName", 8, query.Value));
+                restrictions.Add(new DatabaseRestriction("CommonName", 2, upper));
+            }
+            else if (query.Value.Length > 0 && !query.UsesClientSearch && !query.ExactId.HasValue)
+                restrictions.Add(new DatabaseRestriction(query.Field, 1, templateRestriction ?? query.Value));
 
-                // A sorted column can have only one restriction. The cursor is the sole RequestID bound.
-                if (query.ExactId.HasValue) Restrict(view, "RequestID", 1, query.ExactId.Value);
-                else Restrict(view, "RequestID", before.HasValue ? 2 : 16, before ?? 0, ordered ? 2 : 0);
-                if (query.Disposition.HasValue) Restrict(view, "Request.Disposition", 1, query.Disposition.Value);
-                if (query.Value.Length > 0 && !query.UsesClientSearch && !query.ExactId.HasValue)
-                    Restrict(view, query.Field, 1, templateRestriction ?? query.Value);
+            // Round native minute bounds outward and enforce exact UTC dates on the decoded rows.
+            if (query.ExpiresFrom.HasValue && query.ExpiresFrom.Value.Year >= 1601)
+                restrictions.Add(new DatabaseRestriction("NotAfter", 8, new DateTime(query.ExpiresFrom.Value.Ticks /
+                    TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Utc)));
+            if (query.ExpiresBefore.HasValue && query.ExpiresBefore.Value.Year >= 1601 &&
+                query.ExpiresBefore.Value.Ticks <= DateTime.MaxValue.Ticks - TimeSpan.TicksPerMinute)
+                restrictions.Add(new DatabaseRestriction("NotAfter", 2, new DateTime(
+                    (query.ExpiresBefore.Value.Ticks + TimeSpan.TicksPerMinute - 1) /
+                    TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Utc)));
 
-                // CA date restrictions have minute precision; apply the exact UTC bounds to returned rows below.
-                if (query.ExpiresFrom.HasValue)
-                    Restrict(view, "NotAfter", 8, new DateTime(query.ExpiresFrom.Value.Ticks /
-                        TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Utc));
-                if (query.ExpiresBefore.HasValue && query.ExpiresBefore.Value.Ticks <=
-                    DateTime.MaxValue.Ticks - TimeSpan.TicksPerMinute)
-                    Restrict(view, "NotAfter", 2, new DateTime((query.ExpiresBefore.Value.Ticks +
-                        TimeSpan.TicksPerMinute - 1) / TimeSpan.TicksPerMinute * TimeSpan.TicksPerMinute, DateTimeKind.Utc));
+            // Map the requested projection once and retain row-bound extensions for selective SAN queries.
+            var ordinals = resultColumns.Select(name => Array.FindIndex(Columns, column => string.Equals(
+                NormalizeColumn(name), NormalizeColumn(column), StringComparison.OrdinalIgnoreCase))).ToArray();
+            var searchColumn = query.UsesClientSearch ? Array.IndexOf(Columns, query.Field) : -1;
+            var searchSans = query.Value.Length > 0 && query.Fields.Contains("SubjectAlternativeName");
 
-                // Prepare column lookup state once for the streamed result set.
-                token.ThrowIfCancellationRequested();
-                using (var rows = new ComScope<ICertViewRow>(view.OpenView()))
+            // Fetch the overflow row with the page so detecting more results does not read another whole batch.
+            foreach (var record in CaDatabase.Read(Configuration, resultColumns, restrictions, token, maximumRows,
+                nativeExtensions: searchSans,
+                batchSize: query.UsesClientSearch ? 1000 : Math.Min(1000, query.PageSize) + 1))
+            {
+                var row = new CertificateRow { Configuration = Configuration };
+                var rejected = false;
+                for (var index = 0; index < ordinals.Length; index++)
                 {
-                    var ordinals = new Dictionary<int, int>();
-                    var searchColumn = query.UsesClientSearch ? Array.IndexOf(Columns, query.Field) : -1;
-                    var searchSans = query.Value.Length > 0 && query.Fields.Contains("SubjectAlternativeName");
-                    for (var read = 0; read < maximumRows; read++)
+                    var ordinal = ordinals[index];
+                    var value = record.Values[index];
+                    if (ordinal == 0)
                     {
-                        // Read one request at a time while keeping cancellation responsive.
-                        token.ThrowIfCancellationRequested();
-                        if (rows.Value.Next() < 0) yield break;
-                        var row = new CertificateRow { Configuration = Configuration };
-                        var rejected = false;
-                        using (var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn()))
+                        // Enforce partition bounds before accepting or rejecting any selected text field.
+                        row.RequestId = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                        if (row.RequestId < 1)
+                            throw new InvalidOperationException("The CA returned no request ID for a row.");
+                        if (row.RequestId < minimumId || row.RequestId > maximumId) yield break;
+                        scanned?.Invoke(row.RequestId);
+                    }
+                    if (ordinal == 3)
+                    {
+                        row.Template = Convert.ToString(value, CultureInfo.InvariantCulture);
+                        row.ResolvedTemplate = names?.Template(row.Template);
+                    }
+                    if (ordinal == searchColumn && !(ordinal == 3 ? query.MatchesTemplate(row) :
+                        query.MatchesText(Convert.ToString(value, CultureInfo.InvariantCulture))))
+                    {
+                        rejected = true;
+                        break;
+                    }
+
+                    // Populate browser metadata without retrieving certificate or request blobs.
+                    switch (ordinal)
+                    {
+                        case 1: row.CommonName = Convert.ToString(value, CultureInfo.InvariantCulture); break;
+                        case 2: row.Requester = Convert.ToString(value, CultureInfo.InvariantCulture); break;
+                        case 4: row.SerialNumber = Convert.ToString(value, CultureInfo.InvariantCulture); break;
+                        case 5: row.NotBefore = UtcDate(value); break;
+                        case 6: row.NotAfter = UtcDate(value); break;
+                        case 7: row.Disposition = Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
+                        case 8: row.RevocationReason = value == null || value == DBNull.Value ? null :
+                            (int?)Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
+                    }
+                }
+                token.ThrowIfCancellationRequested();
+                if (rejected) continue;
+                if (searchSans) row.DnsNames = ReadDnsNames(record.NativeRow, token);
+                if (!query.Matches(row)) continue;
+
+                // Resolve directory labels only for matching rows whose projection displays templates.
+                if (resolveTemplates)
+                {
+                    names ??= Oids;
+                    row.ResolvedTemplate ??= names.Template(row.Template);
+                }
+                token.ThrowIfCancellationRequested();
+                yield return row;
+            }
+        }
+
+        private IEnumerable<CertificateRow> ReadSanRows(QuerySpec query, int? before, CancellationToken token,
+            string[] resultColumns, bool resolveTemplates, bool ascending)
+        {
+            // Limit each CA to one broad extension scan and keep only one bounded batch of matching DNS names.
+            var gate = scanGates.GetOrAdd(Configuration, _ => new SemaphoreSlim(1, 1));
+            gate.Wait(token);
+            try
+            {
+                var fields = new[] { "ExtensionRequestId", "ExtensionFlags", "ExtensionRawValue" };
+                var restrictions = new[] { new DatabaseRestriction("ExtensionRequestId",
+                    ascending ? 16 : before.HasValue ? 2 : 16, before ?? 0, ascending ? 1 : 2),
+                    new DatabaseRestriction("ExtensionName", 1, "2.5.29.17") };
+                using var records = CaDatabase.Read(Configuration, fields, restrictions, token, table: 0x3000)
+                    .GetEnumerator();
+                var batch = new Dictionary<int, string[]>();
+                var scanned = 0;
+                while (true)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var finished = !records.MoveNext();
+                    if (!finished)
+                    {
+                        // Ignore disabled or malformed extensions using the same rules as request-bound SAN reads.
+                        var values = records.Current.Values;
+                        var id = Convert.ToInt32(values[0], CultureInfo.InvariantCulture);
+                        if ((Convert.ToInt32(values[1], CultureInfo.InvariantCulture) & 2) == 0)
                         {
-                            int index;
-                            while ((index = columns.Value.Next()) >= 0)
+                            try
                             {
-                                // Cache native column mappings instead of resolving names for every row.
-                                if (!ordinals.TryGetValue(index, out var ordinal))
+                                var dns = OidNames.DnsNames(Convert.FromBase64String(Format(values[2])));
+                                if (dns.Any(query.MatchesText)) batch[id] = dns;
+                            }
+                            catch (Exception error) when (error is FormatException or CryptographicException) { }
+                        }
+                        scanned++;
+                    }
+                    if (!finished && scanned % 2048 != 0) continue;
+                    if (batch.Count > 0)
+                    {
+                        // Join sparse IDs individually; dense matches share one bounded metadata range.
+                        var metadata = new QuerySpec { Disposition = query.Disposition, PageSize = query.PageSize };
+                        var ids = ascending ? batch.Keys.OrderBy(id => id) : batch.Keys.OrderByDescending(id => id);
+                        if (batch.Count < 8)
+                        {
+                            metadata.Field = "RequestID";
+                            foreach (var id in ids)
+                            {
+                                metadata.Value = id.ToString(CultureInfo.InvariantCulture);
+                                foreach (var row in ReadRowsCore(metadata, null, token, true, null, null,
+                                    resultColumns, resolveTemplates))
                                 {
-                                    var name = columns.Value.GetName();
-                                    ordinal = Array.FindIndex(Columns, c => string.Equals(NormalizeColumn(c),
-                                        NormalizeColumn(name), StringComparison.OrdinalIgnoreCase));
-                                    ordinals[index] = ordinal;
-                                }
-                                // Enforce partition bounds before rejecting any selected search field.
-                                if (ordinal < 0) continue;
-                                var value = columns.Value.GetValue(1);
-                                if (ordinal == 0)
-                                {
-                                    row.RequestId = Convert.ToInt32(value, CultureInfo.InvariantCulture);
-                                    if (row.RequestId < 1)
-                                        throw new InvalidOperationException("The CA returned no request ID for a row.");
-                                    if (row.RequestId < minimumId) yield break;
-                                    scanned?.Invoke(row.RequestId);
-                                }
-                                // Resolve template metadata alongside the raw value for display and filtering.
-                                if (ordinal == 3)
-                                {
-                                    row.Template = Convert.ToString(value, CultureInfo.InvariantCulture);
-                                    row.ResolvedTemplate = names?.Template(row.Template);
-                                }
-                                // Stop reading a row as soon as its selected search field fails to match.
-                                if (ordinal == searchColumn && !(ordinal == 3 ? query.MatchesTemplate(row) :
-                                    query.MatchesText(Convert.ToString(value, CultureInfo.InvariantCulture))))
-                                {
-                                    rejected = true;
-                                    break;
-                                }
-                                // Convert the remaining native values into the lightweight browser row.
-                                switch (ordinal)
-                                {
-                                    case 1: row.CommonName = Convert.ToString(value, CultureInfo.InvariantCulture); break;
-                                    case 2: row.Requester = Convert.ToString(value, CultureInfo.InvariantCulture); break;
-                                    case 4: row.SerialNumber = Convert.ToString(value, CultureInfo.InvariantCulture); break;
-                                    case 5: row.NotBefore = UtcDate(value); break;
-                                    case 6: row.NotAfter = UtcDate(value); break;
-                                    case 7: row.Disposition = Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
-                                    case 8: row.RevocationReason = value == null || value == DBNull.Value ? null :
-                                        (int?)Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
+                                    row.DnsNames = batch[id];
+                                    if (query.Matches(row)) yield return row;
                                 }
                             }
                         }
-                        // Enforce exact client-side bounds before exposing a complete matching record.
-                        token.ThrowIfCancellationRequested();
-                        if (row.RequestId < 1)
-                            throw new InvalidOperationException("The CA returned no request ID for a row.");
-                        if (rejected) continue;
-
-                        // Read the SAN extension only when DNS names participate in a nonempty search.
-                        if (searchSans) row.DnsNames = ReadDnsNames(rows.Value, token);
-                        if (!query.Matches(row)) continue;
-
-                        // Resolve display labels only for matching rows when the search does not need them.
-                        if (resolveTemplates)
+                        else
                         {
-                            names ??= Oids;
-                            row.ResolvedTemplate ??= names.Template(row.Template);
+                            var minimum = batch.Keys.Min();
+                            var maximum = batch.Keys.Max();
+                            var rows = ReadRowsCore(metadata, null, token, false, null, null,
+                                resultColumns, resolveTemplates, minimum, maximumId: maximum);
+                            var sorted = ascending ? rows.OrderBy(row => row.RequestId) :
+                                rows.OrderByDescending(row => row.RequestId);
+                            foreach (var row in sorted)
+                            {
+                                if (!batch.TryGetValue(row.RequestId, out var dns)) continue;
+                                row.DnsNames = dns;
+                                if (query.Matches(row)) yield return row;
+                            }
                         }
-                        token.ThrowIfCancellationRequested();
-                        yield return row;
+                        batch.Clear();
                     }
+                    if (finished) yield break;
                 }
             }
+            finally { gate.Release(); }
         }
 
         private static string[] ReadDnsNames(ICertViewRow row, CancellationToken token)
@@ -1063,7 +1152,7 @@ namespace Certitude
             throw new InvalidOperationException("Select a record and its certificate authority to load a certificate.");
 
         internal override CertificatePage ReadBrowserPage(QuerySpec query, CertificateRow before,
-            CancellationToken token)
+            CancellationToken token, ListSortDirection direction = ListSortDirection.Descending)
         {
             // Query each available CA concurrently for the requested browser page.
             query.Validate();
@@ -1077,10 +1166,12 @@ namespace Certitude
                     var bound = before?.RequestId;
                     if (before != null && StringComparer.OrdinalIgnoreCase.Compare(
                         source.Configuration, before.Configuration) > 0)
-                        bound = before.RequestId == int.MaxValue ? null : (int?)(before.RequestId + 1);
+                        bound = direction == ListSortDirection.Ascending ? before.RequestId - 1 :
+                            before.RequestId == int.MaxValue ? null : (int?)(before.RequestId + 1);
 
                     // Tag returned records with their origin for later details and actions.
-                    var page = source.ReadPage(query, bound, token);
+                    var cursor = bound.HasValue ? new CertificateRow { RequestId = bound.Value } : null;
+                    var page = source.ReadBrowserPage(query, cursor, token, direction);
                     foreach (var row in page.Rows) row.Configuration = source.Configuration;
                     return page;
                 }
@@ -1099,14 +1190,14 @@ namespace Certitude
             token.ThrowIfCancellationRequested();
             if (pages.Length == 0) throw new InvalidOperationException(NoAuthorities);
             var rows = SortRows(pages.SelectMany(page => page.Rows), nameof(CertificateRow.RequestId),
-                ListSortDirection.Descending, token);
+                direction, token);
             var result = new CertificatePage { HasMore = rows.Length > query.PageSize || pages.Any(page => page.HasMore) };
             result.Rows.AddRange(rows.Take(query.PageSize));
             return result;
         }
 
         public override IEnumerable<CertificateRow> ReadRows(QuerySpec query, int? before,
-            CancellationToken token, bool ordered = true, string[] fields = null)
+            CancellationToken token, bool ordered = true, string[] fields = null, bool ascending = false)
         {
             // Start a cancellable query using only CAs still available in this selection.
             query.Validate();
@@ -1128,7 +1219,7 @@ namespace Certitude
                     try
                     {
                         // Feed records into bounded queues while retaining their originating CA.
-                        foreach (var row in source.ReadRows(query, before, request.Token, ordered, fields))
+                        foreach (var row in source.ReadRows(query, before, request.Token, ordered, fields, ascending))
                         {
                             row.Configuration = source.Configuration;
                             readAny = true;
@@ -1177,7 +1268,7 @@ namespace Certitude
                             var next = -1;
                             for (var i = 0; i < streams.Length; i++)
                                 if (active[i] && (next < 0 ||
-                                    CompareNewest(streams[i].Current, streams[next].Current) < 0)) next = i;
+                                    CompareNewest(streams[i].Current, streams[next].Current, ascending) < 0)) next = i;
                             if (next < 0) break;
                             yield return streams[next].Current;
                             active[next] = streams[next].MoveNext();
