@@ -18,8 +18,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Certitude")]
 [assembly: AssemblyProduct("Certitude")]
 [assembly: AssemblyDescription("Windows Certificate Authority administration")]
-[assembly: AssemblyVersion("1.0.4.0")]
-[assembly: AssemblyFileVersion("1.0.4.0")]
+[assembly: AssemblyVersion("1.0.5.0")]
+[assembly: AssemblyFileVersion("1.0.5.0")]
 
 namespace Certitude
 {

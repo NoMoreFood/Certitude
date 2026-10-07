@@ -66,6 +66,7 @@ Licensed under GPLv3. See LICENSE.md.
     <Compile Include="ExportCommand.cs" />
     <Compile Include="CaInterop.cs" />
     <Compile Include="CaDatabase.cs" />
+    <Compile Include="SearchProgress.cs" />
     <Compile Include="CaAdministration.cs" />
     <Compile Include="AdministrationWindow.cs" />
     <Compile Include="Dialogs.cs" />

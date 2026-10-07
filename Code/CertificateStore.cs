@@ -141,6 +141,7 @@ namespace Certitude
         public DateTime? ExpiresFrom { get; set; }
         public DateTime? ExpiresBefore { get; set; }
         public int PageSize { get; set; } = 1000;
+        internal SearchProgress Progress { get; set; }
 
         public int? ExactId => Field == "RequestID" && Match == SearchMatch.Exact && Value.Length > 0 ?
             (int?)int.Parse(Value) : null;
@@ -273,6 +274,7 @@ namespace Certitude
         public virtual string Configuration { get; }
         internal virtual bool IsAllAuthorities => false;
         internal virtual string SearchStatus => LoadedOids?.Status ?? "OID Names Not Loaded";
+        internal virtual void PrepareProgress(SearchProgress progress) => progress.For(Configuration);
         private OidNames oidNames;
         internal OidNames Oids => oidNames = OidNames.Load(Configuration);
         internal OidNames LoadedOids => oidNames;
@@ -317,13 +319,16 @@ namespace Certitude
 
         internal virtual CertificatePage ReadBrowserPage(QuerySpec query, CertificateRow before,
             CancellationToken token, ListSortDirection direction = ListSortDirection.Descending)
-            => ReadPage(query, before?.RequestId, token, null, direction == ListSortDirection.Ascending);
+        {
+            try { return ReadPage(query, before?.RequestId, token, null, direction == ListSortDirection.Ascending); }
+            finally { query.Progress?.For(Configuration).Complete(); }
+        }
 
         public CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token)
             => ReadPage(query, before, token, null);
 
         private CertificatePage ReadPage(QuerySpec query, int? before, CancellationToken token, string[] fields,
-            bool ascending = false)
+            bool ascending = false, bool countMatches = true)
         {
             // Validate the query before selecting the paging strategy.
             query.Validate();
@@ -335,9 +340,13 @@ namespace Certitude
                 var records = new Dictionary<int, CertificateRow>();
                 foreach (var branch in ExactFieldQueries(query))
                 {
-                    var result = ReadPage(branch, before, token, fields, ascending);
+                    var result = ReadPage(branch, before, token, fields, ascending, false);
                     page.HasMore |= result.HasMore;
-                    foreach (var row in result.Rows) records[row.RequestId] = row;
+                    foreach (var row in result.Rows)
+                    {
+                        if (countMatches && !records.ContainsKey(row.RequestId)) query.Progress?.Found();
+                        records[row.RequestId] = row;
+                    }
                 }
                 page.HasMore |= records.Count > query.PageSize;
                 page.Rows.AddRange((ascending ? records.Values.OrderBy(row => row.RequestId) :
@@ -352,6 +361,7 @@ namespace Certitude
                     (left, right) => ascending ? CompareNewest(left, right) : CompareNewest(right, left)));
                 foreach (var row in ReadRows(query, before, token, false, fields, ascending))
                 {
+                    if (countMatches) query.Progress?.Found();
                     newest.Add(row);
                     if (newest.Count > query.PageSize + 1) newest.Remove(newest.Min);
                 }
@@ -363,6 +373,7 @@ namespace Certitude
             // Stop the ordered stream after collecting one page and detecting overflow.
             foreach (var row in ReadRows(query, before, token, true, fields, ascending))
             {
+                if (countMatches) query.Progress?.Found();
                 if (page.Rows.Count == query.PageSize)
                 {
                     page.HasMore = true;
@@ -390,7 +401,7 @@ namespace Certitude
                 {
                     Fields = new[] { field }, Value = query.Value, Match = SearchMatch.Exact,
                     Disposition = query.Disposition, ExpiresFrom = query.ExpiresFrom,
-                    ExpiresBefore = query.ExpiresBefore, PageSize = query.PageSize
+                    ExpiresBefore = query.ExpiresBefore, PageSize = query.PageSize, Progress = query.Progress
                 };
             }
         }
@@ -401,7 +412,7 @@ namespace Certitude
             // Page selective indexes without forcing them to scan the CA in request-ID order.
             while (true)
             {
-                var page = ReadPage(query, before, token, fields, ascending);
+                var page = ReadPage(query, before, token, fields, ascending, false);
                 foreach (var row in page.Rows) yield return row;
                 if (!page.HasMore) yield break;
                 before = page.Rows.Last().RequestId;
@@ -418,7 +429,7 @@ namespace Certitude
         }
 
         internal static CertificateRow[] SortRows(IEnumerable<CertificateRow> rows, string field,
-            ListSortDirection direction, CancellationToken token)
+            ListSortDirection direction, CancellationToken token, SearchProgress progress = null)
         {
             // Freeze the current time so expiry-based status comparisons remain stable.
             token.ThrowIfCancellationRequested();
@@ -442,8 +453,9 @@ namespace Certitude
                 _ => throw new ArgumentException("Unknown sort column.")
             };
             // Sort a snapshot with a stable tie-breaker and honor cancellation around the work.
-            var sorted = rows.ToArray();
+            var sorted = (progress == null ? rows : progress.CountMatches(rows)).ToArray();
             token.ThrowIfCancellationRequested();
+            progress?.Sorting(sorted.LongLength);
             Array.Sort(sorted, (left, right) =>
             {
                 var order = direction == ListSortDirection.Descending ? compare(right, left) : compare(left, right);
@@ -501,7 +513,7 @@ namespace Certitude
 
             // Check the status index before an ordered query can scan every issued certificate for an empty view.
             if (query.Disposition is 9 or 21 or 30 or 31 &&
-                !HasRows("Request.Disposition", query.Disposition.Value, token)) yield break;
+                !HasRows("Request.Disposition", query.Disposition.Value, token, query.Progress)) yield break;
 
             // Load directory names before the query only when template labels participate in filtering.
             var names = query.Value.Length > 0 && query.Fields.Contains("CertificateTemplate") ?
@@ -554,7 +566,8 @@ namespace Certitude
             // Rule out absent indexed values before opening an ordered requester or template stream.
             if (ordered && query.Match == SearchMatch.Exact && query.Value.Length > 0 &&
                 query.Field is "RequesterName" or "CertificateTemplate" &&
-                !restrictions.Any(value => HasRows(query.Field, value ?? query.Value, token))) yield break;
+                !restrictions.Any(value => HasRows(query.Field, value ?? query.Value, token, query.Progress)))
+                yield break;
             var streams = restrictions.Select(value => ReadRowsCore(query, before, token, ordered, names,
                 value, resultColumns, resolveTemplates, ascending: ascending).GetEnumerator()).ToArray();
             try
@@ -589,12 +602,12 @@ namespace Certitude
             finally { foreach (var stream in streams) stream.Dispose(); }
         }
 
-        private bool HasRows(string field, object value, CancellationToken token)
+        private bool HasRows(string field, object value, CancellationToken token, SearchProgress progress = null)
         {
             // Select only a request ID and let the CA choose its field index without an ordering constraint.
             token.ThrowIfCancellationRequested();
             return CaDatabase.Read(Configuration, new[] { "RequestID" },
-                new[] { new DatabaseRestriction(field, 1, value) }, token, 1).Any();
+                new[] { new DatabaseRestriction(field, 1, value) }, token, 1, progress: progress).Any();
         }
 
         internal virtual IEnumerable<CertificateRow> ReadRowsForSort(QuerySpec query, CancellationToken token)
@@ -605,7 +618,8 @@ namespace Certitude
             if (IsAllAuthorities || query.Value.Length > 0 ||
                 query.ExpiresFrom.HasValue || query.ExpiresBefore.HasValue)
                 return ReadRows(query, null, token, false);
-            if (query.Disposition.HasValue && !HasRows("Request.Disposition", query.Disposition.Value, token))
+            if (query.Disposition.HasValue &&
+                !HasRows("Request.Disposition", query.Disposition.Value, token, query.Progress))
                 return Enumerable.Empty<CertificateRow>();
 
             // Broad snapshots can collect primary-key ranges concurrently because the final sort defines order.
@@ -742,11 +756,13 @@ namespace Certitude
                 NormalizeColumn(name), NormalizeColumn(column), StringComparison.OrdinalIgnoreCase))).ToArray();
             var searchColumn = query.UsesClientSearch ? Array.IndexOf(Columns, query.Field) : -1;
             var searchSans = query.Value.Length > 0 && query.Fields.Contains("SubjectAlternativeName");
+            var activity = query.Progress?.For(Configuration);
 
             // Fetch the overflow row with the page so detecting more results does not read another whole batch.
             foreach (var record in CaDatabase.Read(Configuration, resultColumns, restrictions, token, maximumRows,
                 nativeExtensions: searchSans,
-                batchSize: query.UsesClientSearch ? 1000 : Math.Min(1000, query.PageSize) + 1))
+                batchSize: query.UsesClientSearch ? 1000 : Math.Min(1000, query.PageSize) + 1,
+                progress: query.Progress))
             {
                 var row = new CertificateRow { Configuration = Configuration };
                 var rejected = false;
@@ -790,7 +806,12 @@ namespace Certitude
                 }
                 token.ThrowIfCancellationRequested();
                 if (rejected) continue;
-                if (searchSans) row.DnsNames = ReadDnsNames(record.NativeRow, token);
+                if (searchSans)
+                    using (activity?.BeginCall("Reading DNS names"))
+                    {
+                        row.DnsNames = ReadDnsNames(record.NativeRow, token);
+                        activity?.Response();
+                    }
                 if (!query.Matches(row)) continue;
 
                 // Resolve directory labels only for matching rows whose projection displays templates.
@@ -816,7 +837,8 @@ namespace Certitude
                 var restrictions = new[] { new DatabaseRestriction("ExtensionRequestId",
                     ascending ? 16 : before.HasValue ? 2 : 16, before ?? 0, ascending ? 1 : 2),
                     new DatabaseRestriction("ExtensionName", 1, "2.5.29.17") };
-                using var records = CaDatabase.Read(Configuration, fields, restrictions, token, table: 0x3000)
+                using var records = CaDatabase.Read(Configuration, fields, restrictions, token, table: 0x3000,
+                    progress: query.Progress)
                     .GetEnumerator();
                 var batch = new Dictionary<int, string[]>();
                 var scanned = 0;
@@ -844,7 +866,8 @@ namespace Certitude
                     if (batch.Count > 0)
                     {
                         // Join sparse IDs individually; dense matches share one bounded metadata range.
-                        var metadata = new QuerySpec { Disposition = query.Disposition, PageSize = query.PageSize };
+                        var metadata = new QuerySpec { Disposition = query.Disposition, PageSize = query.PageSize,
+                            Progress = query.Progress };
                         var ids = ascending ? batch.Keys.OrderBy(id => id) : batch.Keys.OrderByDescending(id => id);
                         if (batch.Count < 8)
                         {
@@ -1131,6 +1154,12 @@ namespace Certitude
             string.Join(" · ", authorities.Where(source => !unavailable.ContainsKey(source.Configuration))
                 .Select(source => source.Configuration + ": " + source.SearchStatus));
 
+        internal override void PrepareProgress(SearchProgress progress)
+        {
+            foreach (var source in authorities.Where(source => !unavailable.ContainsKey(source.Configuration)))
+                source.PrepareProgress(progress);
+        }
+
         internal AllCertificateStore(IEnumerable<CertificateStore> sources) : this(sources
             .GroupBy(source => source.Configuration, StringComparer.OrdinalIgnoreCase).Select(group => group.First())
             .OrderBy(source => source.Configuration, StringComparer.OrdinalIgnoreCase).ToArray()) { }
@@ -1181,6 +1210,7 @@ namespace Certitude
                     // Remember unreachable CAs so subsequent queries can use the remaining servers.
                     token.ThrowIfCancellationRequested();
                     unavailable.TryAdd(source.Configuration, CaAdministration.Error(error));
+                    query.Progress?.For(source.Configuration).Complete(true);
                     return null;
                 }
             }, token, TaskCreationOptions.LongRunning, TaskScheduler.Default)))
@@ -1234,6 +1264,7 @@ namespace Certitude
                         if (!readAny)
                         {
                             unavailable.TryAdd(source.Configuration, CaAdministration.Error(error));
+                            query.Progress?.For(source.Configuration).Complete(true);
                             return;
                         }
                         // A failure after rows were emitted must not turn an incomplete export into a success.
@@ -1244,6 +1275,7 @@ namespace Certitude
                     finally
                     {
                         // Close the queue when its producer, or all shared producers, have finished.
+                        query.Progress?.For(source.Configuration).Complete();
                         if (ordered || Interlocked.Decrement(ref remaining) == 0) buffer.CompleteAdding();
                     }
                 }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();

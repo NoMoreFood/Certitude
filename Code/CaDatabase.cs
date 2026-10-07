@@ -45,16 +45,16 @@ namespace Certitude
 
         internal static IEnumerable<DatabaseRecord> Read(string configuration, string[] fields,
             IEnumerable<DatabaseRestriction> restrictions, CancellationToken token, int maximum = int.MaxValue,
-            int table = 0, bool nativeExtensions = false, int batchSize = 1000)
+            int table = 0, bool nativeExtensions = false, int batchSize = 1000, SearchProgress progress = null)
         {
             // Keep per-request extension access on the native view and batch ordinary metadata over RPC.
             if (table != 0 || nativeExtensions)
             {
-                foreach (var record in ReadNative(configuration, fields, restrictions, token, maximum, table))
+                foreach (var record in ReadNative(configuration, fields, restrictions, token, maximum, table, progress))
                     yield return record;
                 yield break;
             }
-            using var rows = ReadRpc(configuration, fields, restrictions.ToArray(), token, maximum, batchSize)
+            using var rows = ReadRpc(configuration, fields, restrictions.ToArray(), token, maximum, batchSize, progress)
                 .GetEnumerator();
             var available = false;
             var fallback = false;
@@ -64,7 +64,7 @@ namespace Certitude
             if (fallback)
             {
                 // Retry unsupported transports before exposing any records, never after a partial read.
-                foreach (var record in ReadNative(configuration, fields, restrictions, token, maximum, 0))
+                foreach (var record in ReadNative(configuration, fields, restrictions, token, maximum, 0, progress))
                     yield return record;
                 yield break;
             }
@@ -76,15 +76,23 @@ namespace Certitude
         }
 
         private static IEnumerable<DatabaseRecord> ReadRpc(string configuration, string[] fields,
-            DatabaseRestriction[] restrictions, CancellationToken token, int maximum, int batchSize)
+            DatabaseRestriction[] restrictions, CancellationToken token, int maximum, int batchSize,
+            SearchProgress progress)
         {
             // Activate the CA administration transport with encrypted, impersonated calls on this worker.
             token.ThrowIfCancellationRequested();
             var separator = configuration.IndexOf('\\');
             var server = configuration.Substring(0, separator);
             var authority = configuration.Substring(separator + 1);
-            using var scope = new ComScope<ICertAdminD>((ICertAdminD)Activator.CreateInstance(
-                Type.GetTypeFromCLSID(AdministrationClass, server, true)));
+            var activity = progress?.For(configuration);
+            ICertAdminD connection;
+            using (activity?.BeginCall("Connecting to CA"))
+            {
+                connection = (ICertAdminD)Activator.CreateInstance(
+                    Type.GetTypeFromCLSID(AdministrationClass, server, true));
+                activity?.Response();
+            }
+            using var scope = new ComScope<ICertAdminD>(connection);
             var proxy = Marshal.GetComInterfaceForObject(scope.Value, typeof(ICertAdminD));
             try
             {
@@ -96,7 +104,7 @@ namespace Certitude
             finally { Marshal.Release(proxy); }
 
             // Cache immutable column identities per CA without caching a failed schema lookup.
-            var schema = schemas.GetOrAdd(configuration, _ => ReadSchema(scope.Value, authority, token));
+            var schema = schemas.GetOrAdd(configuration, _ => ReadSchema(scope.Value, authority, token, activity));
             Column Find(string name) => schema.TryGetValue(name, out var column) ? column : schema["Request." + name];
             var selected = fields.Select(Find).ToArray();
             var indexes = selected.Select(column => column.Index).ToArray();
@@ -132,9 +140,12 @@ namespace Certitude
                 {
                     token.ThrowIfCancellationRequested();
                     var requested = Math.Min(batchSize, maximum - read);
-                    var status = !opened ? scope.Value.OpenView(authority, bounds.Length, bounds, indexes.Length,
-                        indexes, position, requested, out var fetched, out var blob) :
-                        scope.Value.EnumView(authority, position, requested, out fetched, out blob);
+                    int status, fetched;
+                    CaBlob blob;
+                    using (activity?.BeginCall(opened ? "Reading records" : "Preparing search"))
+                        status = !opened ? scope.Value.OpenView(authority, bounds.Length, bounds, indexes.Length,
+                            indexes, position, requested, out fetched, out blob) :
+                            scope.Value.EnumView(authority, position, requested, out fetched, out blob);
                     byte[] data;
                     try
                     {
@@ -142,6 +153,7 @@ namespace Certitude
                         opened = true;
                         if (fetched < 0 || fetched > requested) throw new InvalidDataException(InvalidResponse);
                         data = CopyBlob(blob);
+                        activity?.Response(fetched);
                     }
                     finally { Marshal.FreeCoTaskMem(blob.Data); }
                     token.ThrowIfCancellationRequested();
@@ -201,26 +213,31 @@ namespace Certitude
             finally
             {
                 // End the server view on cancellation, early disposal and failed reads as well as completion.
-                if (opened) scope.Value.CloseView(authority);
+                if (opened)
+                    using (activity?.BeginCall("Closing search")) scope.Value.CloseView(authority);
                 foreach (var bound in bounds) Marshal.FreeCoTaskMem(bound.Value);
             }
         }
 
         private static Dictionary<string, Column> ReadSchema(ICertAdminD connection, string authority,
-            CancellationToken token)
+            CancellationToken token, SearchProgress.Source activity)
         {
             // Enumerate schema pages so additional server columns cannot truncate name lookup.
             var columns = new Dictionary<string, Column>(StringComparer.OrdinalIgnoreCase);
             for (var first = 0; ; first += 128)
             {
                 token.ThrowIfCancellationRequested();
-                var status = connection.EnumViewColumn(authority, first, 128, out var fetched, out var blob);
+                int status, fetched;
+                CaBlob blob;
+                using (activity?.BeginCall("Preparing search"))
+                    status = connection.EnumViewColumn(authority, first, 128, out fetched, out blob);
                 byte[] data;
                 try
                 {
                     Marshal.ThrowExceptionForHR(status);
                     if (fetched < 0 || fetched > 128) throw new InvalidDataException(InvalidResponse);
                     data = CopyBlob(blob);
+                    activity?.Response();
                 }
                 finally { Marshal.FreeCoTaskMem(blob.Data); }
                 if (data.Length < fetched * 20) throw new InvalidDataException(InvalidResponse);
@@ -251,31 +268,44 @@ namespace Certitude
         }
 
         private static IEnumerable<DatabaseRecord> ReadNative(string configuration, string[] fields,
-            IEnumerable<DatabaseRestriction> restrictions, CancellationToken token, int maximum, int table)
+            IEnumerable<DatabaseRestriction> restrictions, CancellationToken token, int maximum, int table,
+            SearchProgress progress)
         {
             // Retain row-bound extension access and use the selected table's result-column identities.
             token.ThrowIfCancellationRequested();
+            var activity = progress?.For(configuration);
             using var view = ComScope<ICertView2>.Create("CertificateAuthority.View");
-            view.Value.OpenConnection(configuration);
-            if (table != 0) view.Value.SetTable(table);
-            view.Value.SetResultColumnCount(fields.Length);
-            foreach (var field in fields) view.Value.SetResultColumn(view.Value.GetColumnIndex(0, field));
-            foreach (var restriction in restrictions)
+            using (activity?.BeginCall("Connecting to CA"))
             {
-                var value = restriction.Value;
-                view.Value.SetRestriction(view.Value.GetColumnIndex(0, restriction.Field), restriction.Seek,
-                    restriction.Sort, ref value);
+                view.Value.OpenConnection(configuration);
+                activity?.Response();
             }
-            token.ThrowIfCancellationRequested();
-            using var rows = new ComScope<ICertViewRow>(view.Value.OpenView());
+            ICertViewRow nativeRows;
+            using (activity?.BeginCall("Preparing search"))
+            {
+                if (table != 0) view.Value.SetTable(table);
+                view.Value.SetResultColumnCount(fields.Length);
+                foreach (var field in fields) view.Value.SetResultColumn(view.Value.GetColumnIndex(0, field));
+                foreach (var restriction in restrictions)
+                {
+                    var value = restriction.Value;
+                    view.Value.SetRestriction(view.Value.GetColumnIndex(0, restriction.Field), restriction.Seek,
+                        restriction.Sort, ref value);
+                }
+                token.ThrowIfCancellationRequested();
+                nativeRows = view.Value.OpenView();
+                activity?.Response();
+            }
+            using var rows = new ComScope<ICertViewRow>(nativeRows);
             var ordinals = new Dictionary<int, int>();
             for (var read = 0; read < maximum; read++)
             {
                 token.ThrowIfCancellationRequested();
-                if (rows.Value.Next() < 0) yield break;
                 var values = new object[fields.Length];
-                using (var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn()))
+                using (activity?.BeginCall(table == 0 ? "Reading records" : "Searching DNS names"))
                 {
+                    if (rows.Value.Next() < 0) yield break;
+                    using var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn());
                     int index;
                     while ((index = columns.Value.Next()) >= 0)
                     {
@@ -288,6 +318,7 @@ namespace Certitude
                         }
                         if (ordinal >= 0) values[ordinal] = columns.Value.GetValue(1);
                     }
+                    activity?.Response(1);
                 }
                 yield return new DatabaseRecord(values, rows.Value);
             }

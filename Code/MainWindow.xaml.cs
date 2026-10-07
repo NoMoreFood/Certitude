@@ -214,9 +214,29 @@ namespace Certitude
                 queryCancellation = request;
                 loadingQuery = targetPage == 0 ? spec : null;
                 queryLoads++;
+                var source = store;
+                var progress = new SearchProgress();
+                spec.Progress = progress;
+                if (rows == null) source.PrepareProgress(progress);
+                if (queryGate.CurrentCount == 0) progress.SetStage("Waiting for the previous search to stop");
+                var progressTimer = new DispatcherTimer(DispatcherPriority.Background)
+                    { Interval = TimeSpan.FromMilliseconds(500) };
+                void UpdateProgress()
+                {
+                    // Only the current query owns the loading overlay and status line.
+                    if (!ReferenceEquals(queryCancellation, request)) return;
+                    var display = progress.Describe(request.IsCancellationRequested);
+                    LoadingTitle.Text = display.Title;
+                    LoadingSummary.Text = display.Summary;
+                    LoadingDetails.Text = display.Details;
+                    StatusText.Text = display.Title + " · " + display.Summary;
+                    StatusText.ToolTip = display.Title + " · " + display.Summary + Environment.NewLine +
+                        display.Details;
+                }
+                progressTimer.Tick += (sender, e) => UpdateProgress();
                 UpdateControls();
-                StatusText.Text = !native ? "Sorting all matching CA records…" : spec.UsesClientSearch ?
-                    "Searching matching CA records…" : "Loading certificate metadata…";
+                UpdateProgress();
+                progressTimer.Start();
                 SearchHint.Text = spec.Value.Length > 0 && spec.Fields.Contains("SubjectAlternativeName") ?
                     "Searching all matching records for DNS SANs. Large CAs may take longer." : spec.UsesClientSearch ?
                     "Searching the full matching view. Exact searches on one field are faster on large CAs." :
@@ -225,9 +245,11 @@ namespace Certitude
                 {
                     // Serialize CA reads so a cancelled query releases its resources before the next starts.
                     var watch = Stopwatch.StartNew();
-                    var source = store;
                     var token = request.Token;
                     await queryGate.WaitAsync(token);
+                    progress.SetStage(native ? "Searching records" : cached ? "Loading results" :
+                        "Collecting matching records");
+                    if (cached) progress.SetMatches(rows.LongLength);
                     CertificatePage result;
                     try
                     {
@@ -236,7 +258,7 @@ namespace Certitude
                             // Use native paging or sort the complete matching set before slicing the requested page.
                             if (native) return source.ReadBrowserPage(spec, before, token, direction);
                             if (!cached) rows = CertificateStore.SortRows(rows ??
-                                source.ReadRowsForSort(spec, token), field, direction, token);
+                                source.ReadRowsForSort(spec, token), field, direction, token, progress);
                             var offset = checked(targetPage * spec.PageSize);
                             var sortedPage = new CertificatePage { HasMore = rows.Length - offset > spec.PageSize };
                             for (var i = offset; i < Math.Min(rows.Length, offset + spec.PageSize); i++)
@@ -288,7 +310,12 @@ namespace Certitude
                     if (reset) PersistWorkspace();
                     return true;
                 }
-                catch (OperationCanceledException) { }
+                catch (OperationCanceledException)
+                {
+                    if (ReferenceEquals(queryCancellation, request))
+                        Record($"Search cancelled. {progress.Received:N0} records read; " +
+                            $"{progress.Matches:N0} matches found.");
+                }
                 catch (Exception error)
                 {
                     // Ignore superseded failures and surface errors from the current query.
@@ -300,8 +327,11 @@ namespace Certitude
                 finally
                 {
                     // Clear only this load state and restore controls after all outstanding loads settle.
+                    progressTimer.Stop();
+                    spec.Progress = null;
                     if (ReferenceEquals(queryCancellation, request))
                     {
+                        StatusText.ToolTip = null;
                         queryCancellation = null;
                         loadingQuery = null;
                     }
@@ -313,6 +343,12 @@ namespace Certitude
         }
 
         private async void RefreshClick(object sender, RoutedEventArgs e) => await Refresh(true);
+
+        private void LoadingSizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            // Keep the title and counters visible when larger text leaves little space for the loading view.
+            LoadingSpinner.Visibility = e.NewSize.Height < 200 ? Visibility.Collapsed : Visibility.Visible;
+        }
 
         private async Task Refresh(bool refreshNames)
         {
