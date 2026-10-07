@@ -5,15 +5,20 @@
 
 using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
+using Microsoft.Win32;
 
 namespace Certitude
 {
@@ -35,10 +40,35 @@ namespace Certitude
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static int RunGui()
         {
+            // Select software rendering before creating windows in a Horizon session.
+            if (UseSoftwareRendering()) RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+
             // Defer WPF initialization until the splash is visible, including on the first launch.
             var app = new App();
             app.InitializeComponent();
             return app.Run();
+        }
+
+        private static bool UseSoftwareRendering()
+        {
+            try
+            {
+                // Honor explicit preferences before detecting Horizon's session metadata.
+                if (bool.TryParse(ConfigurationManager.AppSettings["SoftwareRendering"], out var software))
+                    return software;
+
+                // Read the current RDS session and the single-user desktop locations.
+                using var process = Process.GetCurrentProcess();
+                using var environment = Registry.CurrentUser.OpenSubKey(@"Volatile Environment");
+                using var session = environment?.OpenSubKey(process.SessionId.ToString(CultureInfo.InvariantCulture));
+                return !string.IsNullOrWhiteSpace(session?.GetValue("ViewClient_Protocol") as string) ||
+                    !string.IsNullOrWhiteSpace(environment?.GetValue("ViewClient_Protocol") as string);
+            }
+            catch (Exception error) when (error is ConfigurationErrorsException or IOException or
+                UnauthorizedAccessException or SecurityException)
+            {
+                return false;
+            }
         }
     }
 
