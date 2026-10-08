@@ -51,8 +51,10 @@ namespace Certitude
 
         public MainWindow()
         {
-            // Initialize version and row actions before sizing the browser for the available screen.
+            // Initialize version, date filters, and row actions before sizing the browser for the available screen.
             InitializeComponent();
+            ExpiresFrom.TextChanged += FilterChanged;
+            ExpiresBefore.TextChanged += FilterChanged;
             Closed += (sender, e) => NavigationVersion++;
             var version = typeof(App).Assembly.GetName().Version.ToString(3);
             applicationTitle = "Certitude " + version;

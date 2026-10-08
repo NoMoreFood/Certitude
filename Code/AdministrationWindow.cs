@@ -238,7 +238,8 @@ namespace Certitude
             var kind = new ComboBox { ItemsSource = new[] { "Base CRLs", "Delta CRLs", "Base And Delta CRLs" },
                 SelectedIndex = 0, Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
             panel.Children.Add(kind);
-            var next = Dialogs.Field(panel, "Next update in UTC (yyyy-MM-dd HH:mm:ss); empty uses CA defaults", width: 220);
+            var next = Dialogs.Field(panel, "Next update in UTC (yyyy-MM-dd HH:mm:ss); empty uses CA defaults",
+                width: 250, dateTime: true);
             TimeDisplay.Input(this, next);
             var republish = new CheckBox
             {
@@ -333,8 +334,8 @@ namespace Certitude
             };
             Dialogs.Note(panel, "Value Type (Detected When Reading)");
             panel.Children.Add(type);
-            var value = Dialogs.Field(panel, "Property value", "", true);
-            TimeDisplay.Input(this, value, enabled: () => type.SelectedIndex == 1);
+            var value = Dialogs.Field(panel, "Property value", "", true, dateTime: true);
+            TimeDisplay.Input(this, value, format: null, type: type);
 
             // Provide guarded read and write actions for the property form.
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -402,8 +403,8 @@ namespace Certitude
             // Attach the value editor and guarded configuration actions.
             Dialogs.Note(panel, "Value type");
             panel.Children.Add(type);
-            var value = Dialogs.Field(panel, "Value", "", true);
-            TimeDisplay.Input(this, value, enabled: () => type.SelectedIndex == 1);
+            var value = Dialogs.Field(panel, "Value", "", true, dateTime: true);
+            TimeDisplay.Input(this, value, format: null, type: type);
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
             panel.Children.Add(buttons);
             Action(buttons, "_Read entry", async () =>

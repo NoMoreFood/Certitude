@@ -94,14 +94,39 @@ namespace Certitude
                 Binding(source: (Func<string>)(() => caption.Replace("UTC", Current.Zone))));
 
         internal static void Input(WorkspacePage page, TextBox box, string format = "yyyy-MM-dd HH:mm:ss",
-            Func<bool> enabled = null) =>
+            ComboBox type = null)
+        {
+            // Enable the picker only for date values and retain multiline editing for other native types.
+            if (box is DateTimePicker picker)
+            {
+                picker.EntryFormat = format;
+                if (type != null)
+                {
+                    void UpdateType()
+                    {
+                        picker.IsPickerEnabled = type.SelectedIndex == 1;
+                        picker.AcceptsReturn = !picker.IsPickerEnabled;
+                        picker.Height = picker.IsPickerEnabled ? double.NaN : 88;
+                        picker.Width = picker.IsPickerEnabled ? 280 : double.NaN;
+                        picker.HorizontalAlignment = picker.IsPickerEnabled ?
+                            HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+                    }
+                    type.SelectionChanged += (sender, args) => UpdateType();
+                    UpdateType();
+                }
+            }
             page.TimeChanged += previousUtc =>
             {
                 // Preserve an already entered instant when its editor changes zones.
-                if (string.IsNullOrWhiteSpace(box.Text) || enabled?.Invoke() == false) return;
-                try { box.Text = Format(Parse(box.Text, previousUtc, format), format + (Current.UseUtc ? "" : " zzz")); }
+                if (string.IsNullOrWhiteSpace(box.Text) || type != null && type.SelectedIndex != 1) return;
+                try
+                {
+                    var utc = Parse(box.Text, previousUtc, format);
+                    box.Text = format == null ? Entry(utc) : Format(utc, format + (Current.UseUtc ? "" : " zzz"));
+                }
                 catch (Exception error) when (error is FormatException or ArgumentException) { }
             };
+        }
 
         public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture) =>
             values[0] switch

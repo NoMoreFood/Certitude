@@ -331,6 +331,41 @@ Licensed under GPLv3. See LICENSE.md.
         </Setter.Value>
       </Setter>
     </Style>
+    <Style TargetType="local:DateTimePicker" BasedOn="{StaticResource {x:Type TextBox}}">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="local:DateTimePicker">
+            <Border x:Name="Chrome" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" />
+                <Button x:Name="PART_PickerButton" Grid.Column="1" Width="28" Margin="0" Padding="0"
+                        Focusable="False" VerticalAlignment="Stretch" ContentTemplate="{x:Null}"
+                        ToolTip="Choose a date and time (Alt+Down)" AutomationProperties.Name="Choose Date And Time">
+                  <TextBlock FontFamily="{StaticResource GlyphFont}" Text="{x:Static local:Glyphs.Calendar}"
+                             HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Button>
+                <Popup x:Name="PART_PickerPopup" Grid.ColumnSpan="2" Placement="Bottom" StaysOpen="False"
+                       AllowsTransparency="True" PlacementTarget="{Binding RelativeSource={RelativeSource TemplatedParent}}" />
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsPickerEnabled" Value="False">
+                <Setter TargetName="PART_PickerButton" Property="Visibility" Value="Collapsed" />
+              </Trigger>
+              <Trigger Property="IsReadOnly" Value="True">
+                <Setter TargetName="PART_PickerButton" Property="Visibility" Value="Collapsed" />
+              </Trigger>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource Accent}" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.6" /></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="Menu" BasedOn="{StaticResource InputStyle}" />
     <Style TargetType="ContextMenu" BasedOn="{StaticResource InputStyle}">
       <Setter Property="Foreground" Value="{DynamicResource Ink}" />

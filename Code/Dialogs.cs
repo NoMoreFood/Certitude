@@ -127,22 +127,22 @@ namespace Certitude
         }
 
         public static TextBox Field(Panel panel, string label, string value = "", bool multiline = false,
-            double width = 480)
+            double width = 480, bool dateTime = false)
         {
             // Keep single-line fields compact while giving multiline editors the available reading space.
             var caption = Glyphs.Label(label);
             if (label.Contains("UTC")) TimeDisplay.Label(caption, ContentControl.ContentProperty, Caption(label));
             caption.Margin = new Thickness(0, 5, 0, 3);
             panel.Children.Add(caption);
-            var box = new TextBox
-            {
-                Text = value, AcceptsReturn = multiline, Height = multiline ? 88 : double.NaN,
-                Width = multiline ? double.NaN : width,
-                HorizontalAlignment = multiline ? HorizontalAlignment.Stretch : HorizontalAlignment.Left,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
-            };
-            if (!multiline) box.SetBinding(FrameworkElement.MaxWidthProperty,
+            TextBox box = dateTime ? new DateTimePicker() : new TextBox();
+            box.Text = value;
+            box.AcceptsReturn = multiline;
+            box.Height = multiline ? 88 : double.NaN;
+            box.Width = multiline ? double.NaN : width;
+            box.HorizontalAlignment = multiline ? HorizontalAlignment.Stretch : HorizontalAlignment.Left;
+            box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            box.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+            if (!multiline || dateTime) box.SetBinding(FrameworkElement.MaxWidthProperty,
                 new Binding("ActualWidth") { Source = panel });
             caption.Target = box;
             AutomationProperties.SetLabeledBy(box, caption);
@@ -428,7 +428,7 @@ namespace Certitude
 
             // Provide an optional effective time in the selected zone with inline validation feedback.
             panel.Children.Add(reason);
-            effective = Dialogs.Field(panel, "Effective Time (UTC)", width: 220);
+            effective = Dialogs.Field(panel, "Effective Time (UTC)", width: 250, dateTime: true);
             TimeDisplay.Input(this, effective);
             Dialogs.Note(panel, "Use yyyy-MM-dd HH:mm:ss, or leave empty for immediately. " +
                 "Only certificate hold can be reversed. Publish a CRL after changing revocation state.");
