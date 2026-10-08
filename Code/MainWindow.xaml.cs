@@ -23,6 +23,7 @@ namespace Certitude
     public partial class MainWindow : Window
     {
         public const string AllAuthoritiesCaption = "All Certificate Authorities";
+        private readonly string applicationTitle;
         private readonly List<CertificateRow> cursors = new List<CertificateRow> { null };
         private readonly DispatcherTimer filterTimer = new DispatcherTimer
             { Interval = TimeSpan.FromMilliseconds(400) };
@@ -53,7 +54,10 @@ namespace Certitude
             // Initialize version and row actions before sizing the browser for the available screen.
             InitializeComponent();
             Closed += (sender, e) => NavigationVersion++;
-            VersionText.Text = "Version " + typeof(App).Assembly.GetName().Version.ToString(3);
+            var version = typeof(App).Assembly.GetName().Version.ToString(3);
+            applicationTitle = "Certitude " + version;
+            Title = applicationTitle;
+            VersionText.Text = "Version " + version;
             BuildContextMenu();
             UpdateContextMenu();
             InitializeColumnMenu();
@@ -126,7 +130,7 @@ namespace Certitude
                     store.Configuration;
                 TargetText.ToolTip = store.IsAllAuthorities ? string.Join(Environment.NewLine, configurations) :
                     store.Configuration;
-                Title = "Certitude — " + store.Configuration;
+                Title = applicationTitle + " — " + store.Configuration;
 
                 // Discard the previous query, rows, and page cursors before the first lookup.
                 page = null;
