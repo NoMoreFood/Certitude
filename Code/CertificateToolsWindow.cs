@@ -342,6 +342,9 @@ namespace Certitude
             Dialogs.MenuItem(menu, "Select _All", Glyphs.SelectAll, "Select all", inventory.SelectAll, "Ctrl+A");
             Dialogs.MenuItem(menu, "Re_load Store", Glyphs.Refresh, "Reload", async () => await Reload());
             menu.Opened += (sender, e) => UpdateContextMenu();
+            Dialogs.ComparisonMenu(inventory, () => ComparisonSource.Encoded(
+                ((InventoryCertificate)inventory.SelectedItem).Encoded, ((InventoryCertificate)inventory.SelectedItem).Subject),
+                () => inventory.SelectedItems.Count == 1, () => cancellation == null && inventory.IsEnabled);
         }
 
         private void UpdateContextMenu()
@@ -800,7 +803,7 @@ namespace Certitude
             Dialogs.Button(actions, "Export _chain…", async () => await SaveTls(true));
             Dialogs.Button(actions, "_Save report…", async () => await SaveText(tlsOutput.Text, "tls-report.txt"));
             tlsOutput = Output();
-            Dialogs.CertificateMenu(tlsOutput, () => tlsResult?.Certificate);
+            Dialogs.CertificateMenu(tlsOutput, () => tlsResult?.Certificate, ready: () => cancellation == null);
             page.Children.Add(tlsOutput);
             Dialogs.ScrollHeader(page, header);
         }
@@ -941,7 +944,10 @@ namespace Certitude
             Dialogs.Button(actions, "_Accept response file…", async () => await AcceptResponse());
             Dialogs.Button(actions, "Save _log…", async () => await SaveText(enrollmentOutput.Text, "enrollment-log.txt"));
             enrollmentOutput = Output();
-            Dialogs.CertificateMenu(enrollmentOutput, () => enrollmentResult?.Certificate);
+            Dialogs.CertificateMenu(enrollmentOutput, () => enrollmentResult?.Certificate,
+                ready: () => cancellation == null);
+            Dialogs.ComparisonMenu(enrollmentOutput, () => ComparisonSource.File(requestPath.Text.Trim()),
+                () => !string.IsNullOrWhiteSpace(requestPath.Text), () => cancellation == null, "CSR ");
             Grid.SetRow(enrollmentOutput, 2);
             body.Children.Add(enrollmentOutput);
         }

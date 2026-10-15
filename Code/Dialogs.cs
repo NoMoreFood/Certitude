@@ -25,7 +25,7 @@ namespace Certitude
             Cancel = "\uE711", Delete = "\uE74D", Copy = "\uE8C8", Save = "\uE74E", Import = "\uE8B5",
             Open = "\uE8DA", Edit = "\uE70F", Settings = "\uE713", Refresh = "\uE72C", Key = "\uE72E",
             Back = "\uE72B", Forward = "\uE72A", List = "\uE8A9", Connect = "\uE703", Theme = "\uE706",
-            SelectAll = "\uE8B3", More = "\uE712", Person = "\uE77B", Statistics = "\uE9D9";
+            SelectAll = "\uE8B3", More = "\uE712", Person = "\uE77B", Statistics = "\uE9D9", Compare = "\uE8AB";
         public static readonly DependencyProperty IconProperty = DependencyProperty.RegisterAttached(
             "Icon", typeof(string), typeof(Glyphs), new PropertyMetadata(""));
         public static string GetIcon(DependencyObject target) => (string)target.GetValue(IconProperty);
@@ -42,6 +42,7 @@ namespace Certitude
             if (text.StartsWith("export") || text.StartsWith("save")) return Save;
             if (text.StartsWith("import") || text.StartsWith("accept response")) return Import;
             if (text.StartsWith("copy")) return Copy;
+            if (text.Contains("compar") || text.StartsWith("swap")) return Compare;
             if (text.StartsWith("open") || text.StartsWith("browse")) return Open;
             if (text.StartsWith("load") || text.StartsWith("retrieve") || text.StartsWith("refresh")) return Refresh;
             if (text.StartsWith("friendly") || text.StartsWith("edit") || text.StartsWith("set ")) return Edit;
@@ -194,11 +195,11 @@ namespace Certitude
             return await page.ShowAsync() == true ? page.Values[0] : null;
         }
 
-        public static void Report(DependencyObject owner, string title, string text) =>
-            Report(owner, title, () => text);
-        public static void Report(DependencyObject owner, string title, TimeReport text) =>
-            Report(owner, title, () => text.ToString());
-        public static void Report(DependencyObject owner, string title, Func<string> text)
+        public static void Report(DependencyObject owner, string title, string text, ComparisonSource comparison = null) =>
+            Report(owner, title, () => text, comparison);
+        public static void Report(DependencyObject owner, string title, TimeReport text, ComparisonSource comparison = null) =>
+            Report(owner, title, () => text.ToString(), comparison);
+        public static void Report(DependencyObject owner, string title, Func<string> text, ComparisonSource comparison = null)
         {
             // Create a workspace report with save and back controls.
             var page = new WorkspacePage { Owner = owner, Title = Caption(title) };
@@ -210,6 +211,7 @@ namespace Certitude
                 Margin = new Thickness(0, 0, 0, 6), VerticalContentAlignment = VerticalAlignment.Top
             };
             TimeDisplay.Text(output, text);
+            if (comparison != null) ComparisonMenu(output, () => comparison, () => true);
             var buttons = new WrapPanel();
             DockPanel.SetDock(buttons, Dock.Bottom);
             layout.Children.Add(buttons);
@@ -298,6 +300,42 @@ namespace Certitude
             target.ContextMenuOpening += (sender, e) => { if (!Update()) e.Handled = true; };
             menu.Opened += (sender, e) => { if (!Update()) menu.IsOpen = false; };
             Update();
+            ComparisonMenu(target, () => ComparisonSource.Encoded(certificate(),
+                ((MainWindow)Application.Current.MainWindow).ActivePage?.Title ?? "Selected Certificate"),
+                () => certificate() != null, ready);
+        }
+
+        public static void ComparisonMenu(FrameworkElement target, Func<ComparisonSource> source,
+            Func<bool> available, Func<bool> ready = null, string artifact = "")
+        {
+            // Preserve normal text editing commands when adding the first explicit menu to an editor.
+            if (target.ContextMenu == null && target is TextBox text)
+            {
+                target.ContextMenu = new ContextMenu();
+                foreach (var command in new[] { System.Windows.Input.ApplicationCommands.Cut,
+                    System.Windows.Input.ApplicationCommands.Copy, System.Windows.Input.ApplicationCommands.Paste,
+                    System.Windows.Input.ApplicationCommands.SelectAll })
+                    if (!text.IsReadOnly || command == System.Windows.Input.ApplicationCommands.Copy ||
+                        command == System.Windows.Input.ApplicationCommands.SelectAll)
+                        target.ContextMenu.Items.Add(new MenuItem { Header = command.Text,
+                            Command = command, CommandTarget = text });
+            }
+            // Offer the same two destinations from certificate, request, template, and CRL surfaces.
+            var menu = target.ContextMenu ??= new ContextMenu();
+            menu.Items.Add(new Separator());
+            var first = MenuItem(menu, "Use " + artifact + "As Comparison _Basis", Glyphs.Compare, "Comparison basis",
+                () => ((MainWindow)Application.Current.MainWindow).OpenComparison(source()));
+            var second = MenuItem(menu, "Compare " + artifact + "_With Basis", Glyphs.Compare, "Comparison with",
+                () => ((MainWindow)Application.Current.MainWindow).OpenComparison(source(), false));
+            void Update()
+            {
+                var visible = available();
+                first.IsEnabled = second.IsEnabled = visible && (ready?.Invoke() ?? true);
+                FilterMenu(menu, item => item == first || item == second ? visible :
+                    item.Visibility == Visibility.Visible);
+            }
+            target.ContextMenuOpening += (sender, e) => Update();
+            menu.Opened += (sender, e) => Update();
         }
 
         public static async Task ExportCertificate(DependencyObject owner, byte[] encoded, string fileName)
@@ -358,7 +396,7 @@ namespace Certitude
             return hasItem;
         }
 
-        public static MenuItem MenuItem(ContextMenu menu, string caption, string icon, string action,
+        public static MenuItem MenuItem(ItemsControl menu, string caption, string icon, string action,
             Action click, string gesture = "")
         {
             // Create a tagged glyph menu item and dispatch it only while enabled.
@@ -551,6 +589,9 @@ namespace Certitude
             // Connect certificate menus, sorting feedback, and selected-value preview updates.
             Dialogs.CertificateMenu(grid, () => detail.Certificate);
             Dialogs.CertificateMenu(value, () => detail.Certificate);
+            foreach (var target in new FrameworkElement[] { grid, value })
+                Dialogs.ComparisonMenu(target, () => ComparisonSource.Encoded(detail.Request, Title + " · CSR"),
+                    () => detail.Request != null, artifact: "CSR ");
             BusyCursor.OnSorting(grid);
             grid.SelectionChanged += (sender, e) => value.Text = (grid.SelectedItem as DetailValue)?.Value ?? "";
             TimeChanged += previousUtc =>

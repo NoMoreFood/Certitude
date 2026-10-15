@@ -131,6 +131,8 @@ Licensed under GPLv3. See LICENSE.md.
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
             <Button Content="Certificate / CRL Chec_k" Click="ValidationClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
+            <Button Content="Compa_rison" Click="ComparisonClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Compare}" />
             <Button x:Name="AdministrationButton" Content="_Administration" Click="AdministrationClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />

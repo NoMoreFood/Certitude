@@ -293,15 +293,19 @@ namespace Certitude
             panel.Children.Add(exportKind);
             var exports = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
             panel.Children.Add(exports);
+            Dialogs.ComparisonMenu(exportKind, () => ComparisonSource.Crl(config,
+                int.Parse(index.Text, CultureInfo.InvariantCulture), exportKind.SelectedIndex == 1),
+                () => int.TryParse(index.Text, out var number) && number >= 0, () => !busy, "CRL ");
             Action(exports, "_Inspect CRL…", async () =>
             {
                 // Read and decode the selected CA CRL with refreshed OID names.
                 var number = int.Parse(index.Text, CultureInfo.InvariantCulture);
                 var delta = exportKind.SelectedIndex == 1;
-                var report = await Task.Run(() => CertificateValidation.InspectCrl(
+                var inspected = await Task.Run(() => CertificateValidation.InspectCrl(
                     CaAdministration.ReadCrl(config, delta, number), config + " · index " + number, null,
-                    Array.Empty<X509Certificate2>(), oidNames.Value.Refresh()).Details);
-                Dialogs.Report(this, "CA CRL", report);
+                    Array.Empty<X509Certificate2>(), oidNames.Value.Refresh()));
+                Dialogs.Report(this, "CA CRL", inspected.Details,
+                    ComparisonSource.Encoded(inspected.Encoded, inspected.Source));
                 Done("CA CRL metadata loaded.");
             });
             Action(exports, "_Export CRL…", async () =>
@@ -450,6 +454,11 @@ namespace Certitude
             names.HorizontalAlignment = HorizontalAlignment.Left;
             var loaded = false;
             string original = null;
+            string SelectedTemplate() => names.SelectedText.Trim().Length > 0 ? names.SelectedText.Trim() :
+                names.GetLineText(names.GetLineIndexFromCharacterIndex(names.CaretIndex)).Trim();
+            Dialogs.ComparisonMenu(names, () => ComparisonSource.Template("", SelectedTemplate(), config),
+                () => loaded && SelectedTemplate().Length > 0 && SelectedTemplate().IndexOfAny(new[] { '\r', '\n' }) < 0,
+                () => !busy, "Template ");
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
             panel.Children.Add(buttons);
             Action(buttons, "_Load templates", async () =>

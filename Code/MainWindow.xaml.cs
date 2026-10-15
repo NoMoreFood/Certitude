@@ -48,6 +48,8 @@ namespace Certitude
         private bool restoringView;
         private string[] configurations = Array.Empty<string>();
         private readonly List<WorkspacePage> workspace = new List<WorkspacePage>();
+        private ComparisonPage comparison;
+        private MenuItem recordComparisonMenu;
 
         public MainWindow()
         {
@@ -660,6 +662,19 @@ namespace Certitude
             Dialogs.MenuItem(menu, "Open In _Windows Certificate Viewer", Glyphs.Certificate, "Windows",
                 async () => await SelectedCertificate(false, true));
 
+            // Offer both comparison destinations for the selected record's certificate, CSR, and template.
+            recordComparisonMenu = new MenuItem { Header = "Compa_rison", Tag = "Comparison" };
+            Glyphs.SetIcon(recordComparisonMenu, Glyphs.Compare);
+            menu.Items.Add(recordComparisonMenu);
+            foreach (var artifact in new[] { "Certificate", "CSR", "Template" })
+                foreach (var basis in new[] { true, false })
+                {
+                    var action = "Compare " + artifact + (basis ? " basis" : " with");
+                    var caption = basis ? "Use " + artifact + " As Comparison Basis" : "Compare " + artifact + " With Basis";
+                    Dialogs.MenuItem(recordComparisonMenu, caption, Glyphs.Compare, action, () => CompareRecord(action));
+                    MoreActions.Items.Add(new ComboBoxItem { Content = caption, Tag = action });
+                }
+
             // Provide copy commands for request identities and certificate serial numbers.
             menu.Items.Add(new Separator());
             Dialogs.MenuItem(menu, "_Copy Request IDs", Glyphs.Copy, "Copy IDs", () => Dialogs.CopyText(
@@ -711,11 +726,21 @@ namespace Certitude
             var any = ready && selected.Length > 0;
             var view = Convert.ToString((Views.SelectedItem as ListBoxItem)?.Tag);
             foreach (var item in Certificates.ContextMenu.Items.OfType<MenuItem>().Cast<FrameworkElement>()
+                .Concat(recordComparisonMenu.Items.OfType<MenuItem>())
                 .Concat(MoreActions.Items.OfType<ComboBoxItem>()))
             {
                 // Enable each action only when every selected record supports it.
                 switch ((string)item.Tag)
                 {
+                    case "Comparison": item.IsEnabled = any && selected.Length == 1; break;
+                    case "Compare Certificate basis":
+                    case "Compare Certificate with":
+                        item.IsEnabled = any && selected.Length == 1 && selected[0].NotAfter.HasValue; break;
+                    case "Compare CSR basis":
+                    case "Compare CSR with": item.IsEnabled = any && selected.Length == 1; break;
+                    case "Compare Template basis":
+                    case "Compare Template with":
+                        item.IsEnabled = any && selected.Length == 1 && !string.IsNullOrEmpty(selected[0].Template); break;
                     case "Open": item.IsEnabled = any && selected.Length == 1; break;
                     case "Windows":
                     case "Export":
@@ -746,6 +771,14 @@ namespace Certitude
             // Determine which operations can apply to the selected certificate or request view.
             bool Applicable(FrameworkElement item)
             {
+                if ((string)item.Tag == "Comparison") return selected.Length == 1;
+                if (((string)item.Tag)?.StartsWith("Compare ", StringComparison.Ordinal) == true)
+                    return selected.Length == 1 && ((string)item.Tag switch
+                    {
+                        "Compare Certificate basis" or "Compare Certificate with" => selected[0].NotAfter.HasValue,
+                        "Compare Template basis" or "Compare Template with" => !string.IsNullOrEmpty(selected[0].Template),
+                        _ => true
+                    });
                 if (view.Length == 0) return true;
                 return (string)item.Tag switch
                 {
@@ -758,7 +791,8 @@ namespace Certitude
             }
             // Hide irrelevant actions in both menus and remove empty context-menu separators.
             Dialogs.FilterMenu(Certificates.ContextMenu, Applicable);
-            foreach (var item in MoreActions.Items.OfType<ComboBoxItem>())
+            foreach (var item in MoreActions.Items.OfType<ComboBoxItem>().Cast<FrameworkElement>()
+                .Concat(recordComparisonMenu.Items.OfType<MenuItem>()))
             {
                 var visible = Applicable(item);
                 item.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
@@ -786,6 +820,17 @@ namespace Certitude
                         detail.Oids) { Owner = this }.Show();
                 else await Dialogs.ExportCertificate(this, certificate, row.RequestId + ".cer");
             });
+        }
+
+        private void CompareRecord(string action)
+        {
+            // Keep request IDs scoped to the selected row's authority, including All CAs results.
+            if (busy || queryLoads > 0 || filtersDirty || Certificates.SelectedItems.Count != 1 ||
+                Certificates.SelectedItem is not CertificateRow row) return;
+            var configuration = store.ForRow(row).Configuration;
+            var source = action.Contains("Template") ? ComparisonSource.Template("", row.Template, configuration) :
+                ComparisonSource.Record(configuration, row.RequestId, action.Contains("CSR"));
+            OpenComparison(source, action.EndsWith(" basis", StringComparison.Ordinal));
         }
 
         private async void ActionClick(object sender, RoutedEventArgs e)
@@ -981,6 +1026,27 @@ namespace Certitude
 
         private void PublishedClick(object sender, RoutedEventArgs e) => Navigate(new PublishedPage(Record));
 
+        internal string[] ComparisonAuthorities => CaDirectory.Configurations(configurations);
+        internal string ComparisonAuthority => store?.IsAllAuthorities == false ? store.Configuration : "";
+
+        private void ComparisonClick(object sender, RoutedEventArgs e) => OpenComparison();
+
+        internal async void OpenComparison(ComparisonSource source = null, bool basis = true)
+        {
+            // Retain both snapshots across navigation and return to the calling page with Back.
+            if (comparison != null && ActivePage == comparison && source == null) return;
+            if (busy || queryLoads > 0 || ActivePage != null && !ActivePage.CanClose()) return;
+            comparison ??= new ComparisonPage();
+            if (workspace.Contains(comparison))
+            {
+                var above = workspace.Skip(workspace.IndexOf(comparison) + 1).ToArray();
+                if (above.Any(page => !page.CanClose())) return;
+                foreach (var page in above.Reverse()) ClosePage(page, null);
+            }
+            else ShowPage(comparison);
+            if (source != null) await comparison.Load(basis ? 0 : 1, source);
+        }
+
         private void StatisticsClick(object sender, RoutedEventArgs e)
         {
             // Open statistics only for an idle single-CA connection.
@@ -1104,7 +1170,8 @@ namespace Certitude
             var enabled = item.IsEnabled && item.Visibility == Visibility.Visible;
             MoreActions.SelectedIndex = 0;
             if (!enabled) return;
-            if (action == "Extension") ExtensionClick(sender, e);
+            if (action.StartsWith("Compare ", StringComparison.Ordinal)) CompareRecord(action);
+            else if (action == "Extension") ExtensionClick(sender, e);
             else if (action == "Archived key") ArchivedKeyClick(sender, e);
             else ActionClick(new Button { Tag = action }, e);
         }

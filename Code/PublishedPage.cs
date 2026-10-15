@@ -127,6 +127,12 @@ namespace Certitude
             }
             grid.ContextMenuOpening += (sender, e) => { if (!UpdateMenu()) e.Handled = true; };
             menu.Opened += (sender, e) => { if (!UpdateMenu()) menu.IsOpen = false; };
+            foreach (var surface in new FrameworkElement[] { grid, details })
+                Dialogs.ComparisonMenu(surface, () =>
+                {
+                    var row = (PublishedArtifact)grid.SelectedItem;
+                    return ComparisonSource.Encoded(row.Encoded, row.Subject + " · " + row.Object.DistinguishedName);
+                }, () => (grid.SelectedItem as PublishedArtifact)?.Readable == true, () => !IsBusy);
 
             // Open certificates in Windows and show CRL details inline on row double-click.
             grid.SelectionChanged += (sender, e) => SelectionChanged();
@@ -355,7 +361,9 @@ namespace Certitude
         {
             // Show publication details even when the stored artifact is unreadable.
             if (!IsBusy && grid.SelectedItem is PublishedArtifact row)
-                Dialogs.Report(this, "Published " + row.Store.ItemName + " Details", () => Describe(row));
+                Dialogs.Report(this, "Published " + row.Store.ItemName + " Details", () => Describe(row),
+                    row.Readable ? ComparisonSource.Encoded(row.Encoded,
+                        row.Subject + " · " + row.Object.DistinguishedName) : null);
         }
 
         private async Task Export()

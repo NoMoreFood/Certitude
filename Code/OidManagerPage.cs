@@ -100,6 +100,11 @@ namespace Certitude
             layout.Children.Add(grid);
             Content = layout;
             Dialogs.ScrollHeader(layout, header);
+            Dialogs.RowMenu(grid);
+            foreach (var surface in new FrameworkElement[] { grid, details })
+                Dialogs.ComparisonMenu(surface, () => ComparisonSource.Template(directory.Server,
+                    ((DirectoryOid)grid.SelectedItem).Value), () => grid.SelectedItem is DirectoryOid selected &&
+                        selected.Kind == "Certificate Template", () => !IsBusy && directory != null, "Template ");
 
             // Refresh filtering and selection state as the user edits the controls.
             search.TextChanged += (sender, e) => Filter();

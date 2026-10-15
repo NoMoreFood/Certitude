@@ -143,6 +143,9 @@ namespace Certitude
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
             saveCrl.IsEnabled = false;
+            Dialogs.ComparisonMenu(downloaded, () => ComparisonSource.Encoded(
+                ((CrlResult)downloaded.SelectedItem).Encoded, ((CrlResult)downloaded.SelectedItem).Source),
+                () => downloaded.SelectedItem is CrlResult, () => cancellation == null, "CRL ");
             Dialogs.Button(controls, "Save _report…", async () =>
             {
                 // Export the visible validation report as text.

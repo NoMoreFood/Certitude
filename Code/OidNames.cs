@@ -122,7 +122,7 @@ namespace Certitude
         private static string Escape(string value) => value.Replace("\\", "\\5c").Replace("*", "\\2a")
             .Replace("(", "\\28").Replace(")", "\\29").Replace("\0", "\\00");
 
-        private static OidDirectory DirectoryFor(string configuration)
+        internal static OidDirectory DirectoryFor(string configuration)
         {
             // Try the current forest first when resolving the selected CA directory.
             OidDirectory directory = null;
@@ -487,7 +487,7 @@ namespace Certitude
             return names.ToArray();
         }
 
-        private static int ReadElement(byte[] bytes, ref int position, int end, out int valueEnd)
+        internal static int ReadElement(byte[] bytes, ref int position, int end, out int valueEnd)
         {
             // Read the DER tag, including any extended tag-number bytes.
             if (position >= end) throw new CryptographicException("Truncated DER tag.");
@@ -535,7 +535,7 @@ namespace Certitude
             }
         }
 
-        private static string DecodeOid(byte[] bytes, int position, int end)
+        internal static string DecodeOid(byte[] bytes, int position, int end)
         {
             // Reject an empty identifier before decoding its numeric arcs.
             if (position == end) throw new CryptographicException("Empty OID.");

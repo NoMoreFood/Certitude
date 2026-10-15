@@ -79,6 +79,8 @@ Licensed under GPLv3. See LICENSE.md.
     <Compile Include="CertificateUtilities.cs" />
     <Compile Include="CertificateToolsWindow.cs" />
     <Compile Include="Enrollment.cs" />
+    <Compile Include="ComparisonData.cs" />
+    <Compile Include="ComparisonPage.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

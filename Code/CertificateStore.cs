@@ -253,6 +253,7 @@ namespace Certitude
         public string Configuration { get; set; }
         public List<DetailValue> Values { get; } = new List<DetailValue>();
         public byte[] Certificate { get; set; }
+        public byte[] Request { get; set; }
         internal OidNames Oids { get; set; }
     }
 
@@ -940,13 +941,16 @@ namespace Certitude
             StringComparison.OrdinalIgnoreCase) ? name.Substring(8) : name;
 
         public virtual byte[] ReadCertificate(int requestId, CancellationToken token)
+            => ReadEncoded(requestId, "RawCertificate", token);
+
+        internal byte[] ReadEncoded(int requestId, string column, CancellationToken token)
         {
-            // Retrieve only the certificate blob when viewing or exporting an individual certificate.
+            // Retrieve one encoded artifact without loading the other request properties.
             token.ThrowIfCancellationRequested();
             using var view = ComScope<ICertView>.Create("CertificateAuthority.View");
             view.Value.OpenConnection(Configuration);
             view.Value.SetResultColumnCount(1);
-            view.Value.SetResultColumn(view.Value.GetColumnIndex(0, "RawCertificate"));
+            view.Value.SetResultColumn(view.Value.GetColumnIndex(0, column));
             Restrict(view.Value, "RequestID", 1, requestId);
 
             // Distinguish a deleted request from an existing request without an issued certificate.
@@ -998,6 +1002,8 @@ namespace Certitude
                             var value = columns.Value.GetValue(1);
                             if (name == "RawCertificate" && value is string encoded && encoded.Length > 0)
                                 details.Certificate = Convert.FromBase64String(encoded);
+                            if (NormalizeColumn(name) == "RawRequest" && value is string request && request.Length > 0)
+                                details.Request = Convert.FromBase64String(request);
                             details.Values.Add(new DetailValue { Name = name, Value = Format(value),
                                 Time = value is DateTime date ? TimeDisplay.Utc(date) : (DateTime?)null });
                             if (NormalizeColumn(name) == "CertificateTemplate")
