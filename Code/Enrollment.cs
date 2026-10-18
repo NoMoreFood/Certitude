@@ -143,10 +143,10 @@ namespace Certitude
             if (text.StartsWith("-----BEGIN", StringComparison.Ordinal))
             {
                 var match = Regex.Match(text,
-                    @"\A-----BEGIN (?:NEW )?CERTIFICATE REQUEST-----\s*([A-Za-z0-9+/=\s]+?)\s*" +
-                    @"-----END (?:NEW )?CERTIFICATE REQUEST-----\z");
+                    @"\A-----BEGIN ((?:NEW )?CERTIFICATE REQUEST)-----([A-Za-z0-9+/=\s]+)" +
+                    @"-----END \1-----\z");
                 if (!match.Success) throw new ArgumentException("Select a PKCS #10 certificate request.");
-                return Convert.FromBase64String(match.Groups[1].Value);
+                return Convert.FromBase64String(match.Groups[2].Value);
             }
             // Decode bare base64 requests while allowing existing DER bytes through unchanged.
             return Regex.IsMatch(text, @"\A[A-Za-z0-9+/=\s]+\z") ? Convert.FromBase64String(text) : bytes;

@@ -71,10 +71,10 @@ namespace Certitude
             finally { if (name != IntPtr.Zero) NetApiBufferFree(name); }
 
             // Find published enterprise CAs in the forest configuration partition.
-            using (var root = new DirectoryEntry("LDAP://RootDSE"))
+            using (var root = OidDirectory.Bind("LDAP://RootDSE"))
             {
                 var context = Convert.ToString(root.Properties["configurationNamingContext"].Value);
-                using (var directory = new DirectoryEntry(
+                using (var directory = OidDirectory.Bind(
                     "LDAP://CN=Enrollment Services,CN=Public Key Services,CN=Services," + context))
                 using (var search = new DirectorySearcher(directory, "(objectClass=pKIEnrollmentService)",
                     new[] { "cn", "dNSHostName" }, SearchScope.OneLevel)

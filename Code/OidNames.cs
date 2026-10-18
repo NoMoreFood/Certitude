@@ -537,8 +537,8 @@ namespace Certitude
 
         internal static string DecodeOid(byte[] bytes, int position, int end)
         {
-            // Reject an empty identifier before decoding its numeric arcs.
-            if (position == end) throw new CryptographicException("Empty OID.");
+            // Bound identifier decoding before allocating arbitrary-precision numeric arcs.
+            if (end <= position || end - position > 1024) throw new CryptographicException("Invalid OID length.");
             var text = new StringBuilder();
             while (position < end)
             {

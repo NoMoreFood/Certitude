@@ -63,7 +63,7 @@ namespace Certitude
                 throw new ArgumentException("Enter a domain or domain controller DNS name, without an LDAP path.");
 
             // Resolve a controller and configuration partition from the target directory.
-            using var root = new DirectoryEntry("LDAP://" + (target.Length == 0 ? "" : target + "/") + "RootDSE");
+            using var root = Bind("LDAP://" + (target.Length == 0 ? "" : target + "/") + "RootDSE");
             var server = Convert.ToString(root.Properties["dnsHostName"].Value);
             var configuration = Convert.ToString(root.Properties["configurationNamingContext"].Value);
             if (string.IsNullOrEmpty(server) || string.IsNullOrEmpty(configuration))
@@ -71,7 +71,11 @@ namespace Certitude
             return new OidDirectory(server, configuration);
         }
 
-        internal DirectoryEntry Open(string name) => new DirectoryEntry("LDAP://" + Server + "/" + name);
+        // Protect directory reads and changes with authenticated, signed and encrypted LDAP sessions.
+        internal static DirectoryEntry Bind(string path) => new DirectoryEntry(path, null, null,
+            AuthenticationTypes.Secure | AuthenticationTypes.Signing | AuthenticationTypes.Sealing);
+
+        internal DirectoryEntry Open(string name) => Bind("LDAP://" + Server + "/" + name);
 
         private static DirectorySearcher Search(DirectoryEntry root, string filter, string[] attributes) =>
             new DirectorySearcher(root, filter, attributes, SearchScope.Subtree)

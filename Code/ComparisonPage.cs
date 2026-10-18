@@ -218,10 +218,11 @@ namespace Certitude
         private void Filter()
         {
             // Filter display and export together without removing matches from the stored comparison.
+            var text = search.Text.Trim();
             var visible = rows.Where(row => (differences.IsChecked != true || row.Different) &&
-                (encoding.IsChecked == true || row.Group != "Encoding") && new[]
+                (encoding.IsChecked == true || row.Group != "Encoding") && (text.Length == 0 || new[]
                     { row.Group, row.Property, row.Result, row.Basis, row.Compared }.Any(value =>
-                        value.IndexOf(search.Text.Trim(), StringComparison.OrdinalIgnoreCase) >= 0)).ToArray();
+                        value.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0))).ToArray();
             grid.ItemsSource = visible;
             preview.Clear();
             export.IsEnabled = rows.Length > 0;

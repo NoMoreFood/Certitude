@@ -35,8 +35,8 @@ namespace Certitude
         public string Property { get; set; }
         internal ComparisonValue First { get; set; }
         internal ComparisonValue Second { get; set; }
-        public string Basis => First == null ? "(Not Present)" : First.Text.Length == 0 ? "(Empty)" : First.Text;
-        public string Compared => Second == null ? "(Not Present)" : Second.Text.Length == 0 ? "(Empty)" : Second.Text;
+        public string Basis => First == null ? "(Not Present)" : First.Text is { Length: > 0 } text ? text : "(Empty)";
+        public string Compared => Second == null ? "(Not Present)" : Second.Text is { Length: > 0 } text ? text : "(Empty)";
         public bool Different => First == null || Second == null || First.Canonical != Second.Canonical;
         public string Result => First == null ? "Comparison Only" : Second == null ? "Basis Only" :
             Different ? "Different" : "Same";
@@ -150,7 +150,7 @@ namespace Certitude
             if (text.StartsWith("-----BEGIN", StringComparison.Ordinal))
             {
                 var match = Regex.Match(text, @"\A-----BEGIN (CERTIFICATE|(?:NEW )?CERTIFICATE REQUEST|" +
-                    @"X509 CRL|PKCS7|CMS)-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END \1-----\z");
+                    @"X509 CRL|PKCS7|CMS)-----([A-Za-z0-9+/=\s]+)-----END \1-----\z");
                 if (!match.Success) throw new InvalidDataException(
                     "Select one public certificate, CSR or CRL. " +
                     "For a certificate bundle, select a certificate in Certificate Manager.");
@@ -513,9 +513,9 @@ namespace Certitude
             value : "0";
         public string Oid => Tag == 6 ? OidNames.DecodeOid(bytes, content, end) :
             throw new InvalidDataException("Expected an object identifier.");
-        public string Integer => Tag == 2 && end > content ?
+        public string Integer => Tag == 2 && end > content && end - content <= 1024 ?
             new BigInteger(Content.Reverse().ToArray()).ToString(CultureInfo.InvariantCulture) :
-            throw new InvalidDataException("Expected an integer.");
+            throw new InvalidDataException("Expected an integer of at most 1,024 bytes.");
         public DateTime Time
         {
             get

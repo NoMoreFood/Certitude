@@ -236,7 +236,7 @@ namespace Certitude
             var text = Encoding.ASCII.GetString(bytes).Trim();
             if (!text.StartsWith("-----BEGIN", StringComparison.Ordinal)) return bytes;
             var matches = Regex.Matches(text,
-                @"-----BEGIN (CERTIFICATE|PKCS7)-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END \1-----");
+                @"-----BEGIN (CERTIFICATE|PKCS7)-----([A-Za-z0-9+/=\s]+)-----END \1-----");
             if (matches.Count == 0 || text.Contains("PRIVATE KEY"))
                 throw new ArgumentException("Use a certificate/PKCS #7 PEM file, or a PFX for private keys.");
             if (matches.Count == 1) return Convert.FromBase64String(matches[0].Groups[2].Value);
