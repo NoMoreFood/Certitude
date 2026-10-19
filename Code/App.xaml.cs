@@ -19,8 +19,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Certitude")]
 [assembly: AssemblyProduct("Certitude")]
 [assembly: AssemblyDescription("Windows Certificate Authority administration")]
-[assembly: AssemblyVersion("1.0.6.0")]
-[assembly: AssemblyFileVersion("1.0.6.0")]
+[assembly: AssemblyVersion("1.0.7.0")]
+[assembly: AssemblyFileVersion("1.0.7.0")]
 
 // Resolve native imports only from System32 so a portable copy cannot load planted DLLs beside it.
 [assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
