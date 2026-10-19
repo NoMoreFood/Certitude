@@ -142,7 +142,7 @@ namespace Certitude
                         text.AppendLine("Certificate: " + certificate.Subject);
                         text.AppendLine("Issuer: " + certificate.Issuer);
                         text.AppendLine("Serial: " + certificate.SerialNumber);
-                        text.AppendLine("SHA-256: " + Hash(certificate.RawData));
+                        text.AppendLine("SHA-256: " + CertificateUtilities.Sha256(certificate.RawData));
                         text.Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine();
                         text.AppendLine("OID Resolution: " + names.Status);
                         text.AppendLine("Mode: " + (offline ? "Offline / local files and Windows cache" : "Online"));
@@ -204,7 +204,8 @@ namespace Certitude
                                 // Include CRLs actually used by Windows without duplicating earlier inspections.
                                 foreach (var bytes in check.Crls)
                                 {
-                                    text.AppendLine("  CRL used by Windows: SHA-256 " + Hash(bytes));
+                                    text.AppendLine("  CRL used by Windows: SHA-256 " +
+                                        CertificateUtilities.Sha256(bytes));
                                     if (selected && !result.Crls.Any(crl => crl.Encoded.SequenceEqual(bytes)))
                                         result.Crls.Add(InspectCrl(bytes, "Windows revocation provider",
                                             certificate, candidates, names));
@@ -342,7 +343,7 @@ namespace Certitude
 
                 // Report CRL identity, validity window, entry count, and current freshness.
                 var text = new TimeReport("CRL: " + source + "\r\n");
-                text.AppendLine("  SHA-256: " + Hash(bytes));
+                text.AppendLine("  SHA-256: " + CertificateUtilities.Sha256(bytes));
                 text.AppendLine("  Issuer: " + issuer.Name);
                 text.AppendLine("  Type: " + (result.IsDelta ? "Delta (requires a compatible base CRL)" : "Base"));
                 text.AppendLine("  Signature algorithm: " + names.Describe(Marshal.PtrToStringAnsi(info.Signature.Oid), 4));
@@ -517,11 +518,6 @@ namespace Certitude
             // Extract an encoded context payload independently of its native lifetime.
             var context = Read<EncodedContext>(pointer);
             return Bytes(new Blob { Data = context.Encoded, Size = context.Size });
-        }
-
-        private static string Hash(byte[] bytes)
-        {
-            using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "");
         }
 
         // Layouts follow wincrypt.h. The chain structs only declare the prefixes read here.

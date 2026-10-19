@@ -36,11 +36,11 @@ try
     # Restrict recursive cleanup to a staging folder inside Build, separate from input and release folders.
     $comparison = [StringComparison]::OrdinalIgnoreCase
     $stagePrefix = $StageDirectory + '\'
-    if (!$StageDirectory.StartsWith($PSScriptRoot + '\', $comparison) -or
-        (Test-Path -LiteralPath $StageDirectory -PathType Leaf))
+    if (!$StageDirectory.StartsWith($PSScriptRoot + '\', $comparison))
     {
         throw 'StageDirectory must be a child folder of the Build directory.'
     }
+    if (Test-Path -LiteralPath $StageDirectory) { Remove-Item -LiteralPath $StageDirectory -Recurse -Force }
     foreach ($protectedDirectory in @($BinaryDirectory, $OutputDirectory))
     {
         $protectedPrefix = $protectedDirectory.TrimEnd('\') + '\'

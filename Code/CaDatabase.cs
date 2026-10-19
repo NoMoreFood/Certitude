@@ -59,8 +59,9 @@ namespace Certitude
             var available = false;
             var fallback = false;
             try { available = rows.MoveNext(); }
-            catch (COMException error) when (error.HResult is unchecked((int)0x80040154) or
-                unchecked((int)0x80040155) or unchecked((int)0x80004002)) { fallback = true; }
+            catch (Exception error) when (error is COMException or InvalidCastException && error.HResult is
+                unchecked((int)0x80040154) or unchecked((int)0x80040155) or unchecked((int)0x80004002))
+            { fallback = true; }
             if (fallback)
             {
                 // Retry unsupported transports before exposing any records, never after a partial read.

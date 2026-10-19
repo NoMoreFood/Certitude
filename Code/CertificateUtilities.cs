@@ -92,7 +92,7 @@ namespace Certitude
             };
 
             // Calculate a strong fingerprint and obtain the key size when its provider supports it.
-            using (var hash = SHA256.Create()) item.Sha256 = Hex(hash.ComputeHash(item.Encoded));
+            item.Sha256 = Sha256(item.Encoded);
             try
             {
                 using (var rsa = certificate.GetRSAPublicKey())
@@ -570,6 +570,10 @@ namespace Certitude
             }
         }
 
-        private static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-", "");
+        internal static string Sha256(byte[] bytes)
+        {
+            using var hash = SHA256.Create();
+            return BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", "");
+        }
     }
 }

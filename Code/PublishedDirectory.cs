@@ -255,9 +255,7 @@ namespace Certitude
             // Ignore the required-attribute placeholder and fingerprint real publication values.
             if (store.RequiredValue && value.Length == 1 && value[0] == 0)
                 return Array.Empty<PublishedArtifact>();
-            string fingerprint;
-            using (var hash = SHA256.Create())
-                fingerprint = BitConverter.ToString(hash.ComputeHash(value)).Replace("-", "");
+            var fingerprint = CertificateUtilities.Sha256(value);
             PublishedArtifact Row(byte[] encoded, int direction)
             {
                 // Describe an artifact while retaining its source value even if decoding fails.

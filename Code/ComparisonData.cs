@@ -52,7 +52,9 @@ namespace Certitude
             string key = null)
         {
             // Keep identity separate from display names so OID labels cannot change the comparison result.
-            Values.Add(group + "/" + (key ?? name), new ComparisonValue
+            var identity = group + "/" + (key ?? name);
+            if (Values.ContainsKey(identity)) throw new InvalidDataException("The artifact repeats " + name + ".");
+            Values.Add(identity, new ComparisonValue
             {
                 Group = group, Name = name, Canonical = canonical ?? text ?? "", Render = render ?? (() => text ?? "")
             });
@@ -284,7 +286,7 @@ namespace Certitude
             result.Add("Public Key", "Parameters", algorithm.Length == 2 ? algorithm[1].Text : "",
                 Convert.ToBase64String(parameters));
             var encodedKey = fields[1].Content.Skip(1).ToArray();
-            result.Add("Public Key", "Key SHA-256", Hash(encodedKey));
+            result.Add("Public Key", "Key SHA-256", CertificateUtilities.Sha256(encodedKey));
             result.Add("Public Key", "Key (Base64)", Convert.ToBase64String(encodedKey));
             if (oid is "1.2.840.113549.1.1.1" or "1.2.840.113549.1.1.10")
             {
@@ -313,7 +315,7 @@ namespace Certitude
                 throw new InvalidDataException("Invalid signature encoding.");
             result.Add("Signature", "Algorithm", OidNames.Windows.Describe(algorithm[0].Oid, 4), algorithm[0].Oid);
             if (algorithm.Length > 1) result.Add("Signature", "Parameters", algorithm[1].Text, algorithm[1].Base64);
-            result.Add("Encoding", "SHA-256", Hash(root.Encoded));
+            result.Add("Encoding", "SHA-256", CertificateUtilities.Sha256(root.Encoded));
             result.Add("Encoding", "Size (Bytes)", root.Encoded.Length.ToString(CultureInfo.InvariantCulture));
             result.Add("Encoding", "Signature (Base64)", parts[2].Base64);
         }
@@ -492,12 +494,6 @@ namespace Certitude
                 long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var flags))
                 return text + " (0x" + unchecked((uint)flags).ToString("X8") + ")";
             return text;
-        }
-
-        private static string Hash(byte[] bytes)
-        {
-            using var hash = SHA256.Create();
-            return BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", "");
         }
     }
 

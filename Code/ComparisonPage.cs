@@ -250,16 +250,10 @@ namespace Certitude
             if (await picker.ShowAsync() != true) return;
             try
             {
-                string Csv(string value)
-                {
-                    value ??= "";
-                    if (value.TrimStart().Length > 0 && "=+-@".Contains(value.TrimStart()[0])) value = "'" + value;
-                    return "\"" + value.Replace("\"", "\"\"") + "\"";
-                }
                 var text = new StringBuilder(
                     "Basis Source,Comparison Source,Section,Property,Result,Basis,Comparison\r\n");
                 foreach (var row in selected) text.AppendLine(string.Join(",", new[] { first, second, row.Group,
-                    row.Property, row.Result, row.Basis, row.Compared }.Select(Csv)));
+                    row.Property, row.Result, row.Basis, row.Compared }.Select(CertificateStore.Csv)));
                 await Task.Run(() => CertificateUtilities.WriteAtomic(picker.FileName,
                     Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(text.ToString())).ToArray()));
                 status.Text = $"Exported {selected.Length:N0} Rows.";

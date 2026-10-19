@@ -484,29 +484,10 @@ namespace Certitude
                             if (seen.Add(row.RequestId)) yield return row;
                     yield break;
                 }
-                var fieldStreams = branches.Select(branch =>
-                    ReadFieldPages(branch, before, token, fields, ascending).GetEnumerator()).ToArray();
-                try
-                {
-                    var active = fieldStreams.Select(stream => stream.MoveNext()).ToArray();
-                    while (true)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        var next = -1;
-                        for (var i = 0; i < fieldStreams.Length; i++)
-                            if (active[i] && (next < 0 ||
-                                (ascending ? fieldStreams[i].Current.RequestId < fieldStreams[next].Current.RequestId :
-                                    fieldStreams[i].Current.RequestId > fieldStreams[next].Current.RequestId)))
-                                next = i;
-                        if (next < 0) yield break;
-                        var row = fieldStreams[next].Current;
-                        yield return row;
-                        for (var i = 0; i < fieldStreams.Length; i++)
-                            if (active[i] && fieldStreams[i].Current.RequestId == row.RequestId)
-                                active[i] = fieldStreams[i].MoveNext();
-                    }
-                }
-                finally { foreach (var stream in fieldStreams) stream.Dispose(); }
+                foreach (var row in Merge(branches.Select(branch =>
+                    ReadFieldPages(branch, before, token, fields, ascending)).ToArray(), ascending, token))
+                    yield return row;
+                yield break;
             }
             if (query.ExactId.HasValue && before.HasValue && (ascending ? query.ExactId.Value <= before.Value :
                 query.ExactId.Value >= before.Value)) yield break;
@@ -570,17 +551,20 @@ namespace Certitude
                 !restrictions.Any(value => HasRows(query.Field, value ?? query.Value, token, query.Progress)))
                 yield break;
             var streams = restrictions.Select(value => ReadRowsCore(query, before, token, ordered, names,
-                value, resultColumns, resolveTemplates, ascending: ascending).GetEnumerator()).ToArray();
+                value, resultColumns, resolveTemplates, ascending: ascending)).ToArray();
+
+            // Stream directly unless ordered template-name/OID results need merging without materializing them.
+            foreach (var row in !ordered || streams.Length == 1 ? streams.SelectMany(stream => stream) :
+                Merge(streams, ascending, token)) yield return row;
+        }
+
+        private static IEnumerable<CertificateRow> Merge(IEnumerable<CertificateRow>[] sources, bool ascending,
+            CancellationToken token)
+        {
+            // Merge request-ID ordered streams and emit each request once even when several streams contain it.
+            var streams = sources.Select(source => source.GetEnumerator()).ToArray();
             try
             {
-                // Stream directly when no merge of ordered template results is necessary.
-                if (!ordered || streams.Length == 1)
-                {
-                    foreach (var stream in streams)
-                        while (stream.MoveNext()) yield return stream.Current;
-                    yield break;
-                }
-                // Merge indexed template-name/OID queries without materializing the matching CA records.
                 var active = streams.Select(stream => stream.MoveNext()).ToArray();
                 while (true)
                 {
@@ -592,8 +576,6 @@ namespace Certitude
                             streams[i].Current.RequestId > streams[next].Current.RequestId)))
                             next = i;
                     if (next < 0) yield break;
-
-                    // Emit each request once even when several template restrictions match it.
                     var row = streams[next].Current;
                     yield return row;
                     for (var i = 0; i < streams.Length; i++)

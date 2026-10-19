@@ -720,14 +720,15 @@ namespace Certitude
 
         private void UpdateContextMenu()
         {
-            // Apply the same readiness rules to row menus and More Actions.
+            // Apply the same readiness rules to row menus, toolbar actions and More Actions.
             var selected = Certificates.SelectedItems.Cast<CertificateRow>().ToArray();
             var ready = !busy && queryLoads == 0 && !filtersDirty && store != null && workspace.Count == 0;
             var any = ready && selected.Length > 0;
             var view = Convert.ToString((Views.SelectedItem as ListBoxItem)?.Tag);
+            var toolbar = ActionsPanel.Children.OfType<Button>().ToArray();
             foreach (var item in Certificates.ContextMenu.Items.OfType<MenuItem>().Cast<FrameworkElement>()
                 .Concat(recordComparisonMenu.Items.OfType<MenuItem>())
-                .Concat(MoreActions.Items.OfType<ComboBoxItem>()))
+                .Concat(MoreActions.Items.OfType<ComboBoxItem>()).Concat(toolbar))
             {
                 // Enable each action only when every selected record supports it.
                 switch ((string)item.Tag)
@@ -792,7 +793,7 @@ namespace Certitude
             // Hide irrelevant actions in both menus and remove empty context-menu separators.
             Dialogs.FilterMenu(Certificates.ContextMenu, Applicable);
             foreach (var item in MoreActions.Items.OfType<ComboBoxItem>().Cast<FrameworkElement>()
-                .Concat(recordComparisonMenu.Items.OfType<MenuItem>()))
+                .Concat(recordComparisonMenu.Items.OfType<MenuItem>()).Concat(toolbar))
             {
                 var visible = Applicable(item);
                 item.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
@@ -991,11 +992,13 @@ namespace Certitude
             if (busy || queryLoads > 0 || filtersDirty || query == null) return;
             var save = new FilePicker(true) { FileName = "certificates.csv", Filter = "CSV|*.csv" };
             if (await save.ShowAsync() != true) return;
+            var source = store;
+            var spec = query;
             await Run("Exporting all records matching the applied query…", async token =>
             {
                 // Stream all matching records to CSV while reporting export progress.
                 var progress = new Progress<long>(count => StatusText.Text = $"Exported {count:N0} records…");
-                var count = await Task.Run(() => store.Export(query, save.FileName, token,
+                var count = await Task.Run(() => source.Export(spec, save.FileName, token,
                     value => ((IProgress<long>)progress).Report(value)), token);
                 Record($"Exported {count:N0} records to {save.FileName}.");
             });

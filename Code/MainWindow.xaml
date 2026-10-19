@@ -312,7 +312,8 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="ExportButton" DockPanel.Dock="Right" Content="_Export CSV" Click="ExportClick"
                     Margin="5,0,0,0" IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Save}" />
             <StackPanel x:Name="ActionsPanel" Orientation="Horizontal" IsEnabled="False">
-              <Button Content="_Open" Click="OpenClick" local:Glyphs.Icon="{x:Static local:Glyphs.Document}" />
+              <Button Content="_Open" Tag="Open" Click="OpenClick"
+                      local:Glyphs.Icon="{x:Static local:Glyphs.Document}" />
               <Button Content="_Issue" Tag="Issue" Click="ActionClick" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
               <Button Content="_Revoke" Tag="Revoke" Click="ActionClick" local:Glyphs.Icon="{x:Static local:Glyphs.Block}" />
               <ComboBox x:Name="MoreActions" Width="184" SelectedIndex="0" SelectionChanged="MoreActionClick"
