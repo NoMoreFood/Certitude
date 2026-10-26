@@ -27,6 +27,40 @@ namespace Certitude
                 return operation(admin.Value);
         }
 
+        internal static TimeReport RunAuthorities(IEnumerable<string> configurations, Func<string, TimeReport> operation,
+            CancellationToken token, Action<string> progress)
+        {
+            // Validate every target before starting and attempt each CA once, even after another CA fails.
+            var targets = configurations.Select(config => new CertificateStore(config).Configuration)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (targets.Length == 0) throw new ArgumentException("No certificate authorities are connected.");
+            var report = new TimeReport();
+            var attempted = 0;
+            var failed = 0;
+            foreach (var target in targets)
+            {
+                if (token.IsCancellationRequested) break;
+                progress?.Invoke($"CA {attempted + 1:N0} of {targets.Length:N0}: {target}");
+                report.AppendLine("CA: " + target);
+                try { report.AppendLine(operation(target)); }
+                catch (Exception error)
+                {
+                    report.AppendLine("FAILED: " + Error(error));
+                    failed++;
+                }
+                attempted++;
+                report.AppendLine();
+            }
+
+            // Preserve partial results and distinguish returned calls from their reported publication outcomes.
+            report.AppendLine($"{attempted:N0} of {targets.Length:N0} CAs attempted; {failed:N0} calls failed; " +
+                $"{targets.Length - attempted:N0} not attempted.");
+            if (attempted < targets.Length)
+                report.AppendLine("Cancelled. Completed CA changes remain applied; remaining CAs were not attempted.")
+                    .AppendLine("Not attempted: " + string.Join(", ", targets.Skip(attempted)));
+            return report;
+        }
+
         internal static void ValidateCrlPublication(int flags, DateTime? nextUpdate)
         {
             // Reject unsupported publication flags and expiry overrides that conflict with republishing.

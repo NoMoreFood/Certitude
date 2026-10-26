@@ -558,8 +558,9 @@ namespace Certitude
             Views.IsEnabled = FilterPanel.IsEnabled = store != null && !busy;
             ActionsPanel.IsEnabled = !working && !filtersDirty && Certificates.SelectedItems.Count > 0;
             ExportButton.IsEnabled = !working && !filtersDirty && query != null;
-            StatisticsButton.IsEnabled = AdministrationButton.IsEnabled = ToolsButton.IsEnabled =
-                !working && store != null && !store.IsAllAuthorities;
+            AdministrationButton.IsEnabled = ToolsButton.IsEnabled = !working && store != null;
+            StatisticsButton.IsEnabled = !working && store != null && !store.IsAllAuthorities;
+            StatisticsButton.Visibility = store?.IsAllAuthorities == true ? Visibility.Collapsed : Visibility.Visible;
             if (autoAuthorityColumn)
                 AuthorityColumn.Visibility = store?.IsAllAuthorities == true ? Visibility.Visible : Visibility.Collapsed;
             if (Certificates.Columns.All(column => column.Visibility != Visibility.Visible))
@@ -1006,16 +1007,16 @@ namespace Certitude
 
         private void AdministrationClick(object sender, RoutedEventArgs e)
         {
-            // Open administration only for an idle single-CA connection.
-            if (busy || queryLoads > 0 || store == null || store.IsAllAuthorities) return;
-            Navigate(new AdministrationWindow(store.Configuration, Record, store.LoadedOids));
+            // Let the administration page expose actions supported by the connected targets.
+            if (busy || queryLoads > 0 || store == null) return;
+            Navigate(new AdministrationWindow(store, Record));
         }
 
         private void ToolsClick(object sender, RoutedEventArgs e)
         {
-            // Open maintenance tools only for an idle single-CA connection.
-            if (busy || queryLoads > 0 || store == null || store.IsAllAuthorities) return;
-            Navigate(new ToolWindow(store.Configuration, Record));
+            // Let the maintenance page restrict combined connections to connectivity checks.
+            if (busy || queryLoads > 0 || store == null) return;
+            Navigate(new ToolWindow(store, Record));
         }
 
         private void ValidationClick(object sender, RoutedEventArgs e) =>

@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,31 +20,51 @@ namespace Certitude
     internal sealed class AdministrationWindow : WorkspacePage
     {
         private readonly string config;
+        private readonly string[] configurations;
+        private readonly bool allAuthorities;
         private readonly Lazy<OidNames> oidNames;
         private readonly Action<string> record;
         private readonly TabControl tabs = new TabControl();
-        private readonly TextBlock status = new TextBlock { Margin = new Thickness(0, 14, 0, 0), TextWrapping = TextWrapping.Wrap };
+        private readonly TextBlock status = new TextBlock
+            { VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+        private readonly Button cancel;
+        private CancellationTokenSource cancellation;
         private bool busy;
 
-        public AdministrationWindow(string configuration, Action<string> log, OidNames names = null)
+        public AdministrationWindow(CertificateStore store, Action<string> log)
         {
-            // Bind administration pages and status reporting to the selected CA.
-            config = configuration;
-            oidNames = new Lazy<OidNames>(() => names ?? OidNames.Load(config));
+            // Snapshot the connected targets, including CAs unavailable to certificate queries.
+            config = store.Configuration;
+            configurations = store.Configurations;
+            allAuthorities = store.IsAllAuthorities;
+            oidNames = new Lazy<OidNames>(() => store.LoadedOids ?? OidNames.Load(config));
             record = log;
             Title = "Administration — " + config;
             var layout = new DockPanel { Margin = new Thickness(8) };
-            DockPanel.SetDock(status, Dock.Bottom);
-            layout.Children.Add(status);
+            var footer = new DockPanel { Margin = new Thickness(0, 14, 0, 0) };
+            DockPanel.SetDock(footer, Dock.Bottom);
+            layout.Children.Add(footer);
+            cancel = Dialogs.Button(Dialogs.RightActions(footer), "Cancel Remaining CAs", () =>
+            {
+                cancellation?.Cancel();
+                cancel.IsEnabled = false;
+                status.Text = "Cancelling after the current CA call returns…";
+            });
+            cancel.IsEnabled = false;
+            cancel.Visibility = allAuthorities ? Visibility.Visible : Visibility.Collapsed;
+            footer.Children.Add(status);
             layout.Children.Add(tabs);
             Content = layout;
 
             // Build the operation tabs and prevent navigation during an active CA call.
             BuildOperations();
             BuildCrls();
-            BuildProperties();
-            BuildConfiguration();
-            BuildTemplates();
+            if (!allAuthorities)
+            {
+                BuildProperties();
+                BuildConfiguration();
+                BuildTemplates();
+            }
             Closing += (sender, e) =>
             {
                 if (!busy) return;
@@ -85,10 +106,35 @@ namespace Certitude
             });
         }
 
-        private Task<bool> Confirm(string action, string details) => Dialogs.Confirm(this,
-            "Confirm CA Change", action + "\r\nCA: " + config + "\r\n\r\n" + details);
-        private Task<bool> Confirm(string action, Func<string> details) => Dialogs.Confirm(this,
-            "Confirm CA Change", () => action + "\r\nCA: " + config + "\r\n\r\n" + details());
+        private Task<bool> Confirm(string action, string details) => Confirm(action, () => details);
+        private async Task<bool> Confirm(string action, Func<string> details)
+        {
+            // Identify every target and make cancellation explicit before any changes begin.
+            var confirmed = await Dialogs.Confirm(this, "Confirm CA Change", () => action + "\r\nCA targets:\r\n" +
+                string.Join("\r\n", configurations) + "\r\n\r\n" + details() +
+                (allAuthorities ? "\r\n\r\nEach CA is attempted independently. " +
+                    "Failures or cancellation do not undo completed changes." : ""));
+            if (!confirmed) Done("Cancelled. No CA changes made.");
+            return confirmed;
+        }
+
+        private async Task<TimeReport> ForAuthorities(Func<string, TimeReport> operation)
+        {
+            // Show each target while preserving completed results if later calls fail or are cancelled.
+            using var request = new CancellationTokenSource();
+            cancellation = request;
+            cancel.IsEnabled = true;
+            var progress = new Progress<string>(text =>
+            {
+                if (cancellation == request && !request.IsCancellationRequested) status.Text = text;
+            });
+            try
+            {
+                return await Task.Run(() => CaAdministration.RunAuthorities(configurations, operation, request.Token,
+                    text => ((IProgress<string>)progress).Report(text)));
+            }
+            finally { cancellation = null; cancel.IsEnabled = false; }
+        }
 
         private void Done(string text)
         {
@@ -101,12 +147,16 @@ namespace Certitude
         {
             // Group CA information actions separately from request and service operations.
             var panel = Page("_Operations");
-            Dialogs.Note(panel, "Certificate authority: " + config);
+            Dialogs.Note(panel, "Certificate authorities:\n" + string.Join("\n", configurations));
+            if (allAuthorities)
+                Dialogs.Note(panel, "Actions attempt every listed CA independently, including CAs unavailable to " +
+                    "certificate queries. Connect to one CA for enrollment, configuration, templates " +
+                    "or service changes.");
             var read = new WrapPanel();
             panel.Children.Add(read);
             Action(read, "CA _information", async () =>
             {
-                var text = await Task.Run(() => CaAdministration.Use(config, admin =>
+                var text = await ForAuthorities(config => CaAdministration.Use(config, admin =>
                 {
                     // Read supported CA properties independently so unavailable values remain visible.
                     var result = new TimeReport();
@@ -134,9 +184,9 @@ namespace Certitude
                     return result;
                 }));
                 Dialogs.Report(this, "CA information", text);
-                Done("CA information loaded.");
+                Done("CA information collected. Review the report for errors or skipped CAs.");
             });
-            Action(read, "View CA _certificate…", async () =>
+            if (!allAuthorities) Action(read, "View CA _certificate…", async () =>
             {
                 // Fetch the CA certificate before opening its decoded details.
                 var bytes = await Task.Run(() =>
@@ -150,7 +200,7 @@ namespace Certitude
             Action(read, "Database _schema…", async () =>
             {
                 // Read database column types and indexing information on a worker thread.
-                var text = await Task.Run(() =>
+                var text = await ForAuthorities(config =>
                 {
                     using (var view = ComScope<ICertView>.Create("CertificateAuthority.View"))
                     {
@@ -161,51 +211,54 @@ namespace Certitude
                             while (columns.Value.Next() >= 0)
                                 result.AppendLine($"{columns.Value.GetName()}\t{columns.Value.GetType()}\t" +
                                     $"{columns.Value.IsIndexed() != 0}");
-                            return result.ToString();
+                            return new TimeReport(result.ToString());
                         }
                     }
                 });
 
                 // Present the completed schema report in the workspace.
                 Dialogs.Report(this, "CA database schema", text);
-                Done("Schema loaded.");
+                Done("Schemas collected. Review the report for errors or skipped CAs.");
             });
 
-            // Provide request submission and issued-certificate import actions.
-            Dialogs.Note(panel, "Certificate requests");
-            var requests = new WrapPanel();
-            panel.Children.Add(requests);
-            Action(requests, "_Submit PKCS #10 request…", async () =>
+            if (!allAuthorities)
             {
-                // Choose a request and confirm its enrollment attributes before submitting it.
-                var open = new FilePicker() { Filter = "PKCS #10 request|*.req;*.csr;*.p10;*.pem|All files|*.*" };
-                if (await open.ShowAsync() != true) return;
-                var attributes = await Dialogs.Prompt(this, "Request attributes",
-                    "Optional Name:Value pairs, one per line", "", true);
-                if (attributes == null ||
-                    !await Confirm("Submit certificate request", open.FileName + "\r\n" + attributes)) return;
+                // Provide request submission and issued-certificate import actions.
+                Dialogs.Note(panel, "Certificate requests");
+                var requests = new WrapPanel();
+                panel.Children.Add(requests);
+                Action(requests, "_Submit PKCS #10 request…", async () =>
+                {
+                    // Choose a request and confirm its enrollment attributes before submitting it.
+                    var open = new FilePicker() { Filter = "PKCS #10 request|*.req;*.csr;*.p10;*.pem|All files|*.*" };
+                    if (await open.ShowAsync() != true) return;
+                    var attributes = await Dialogs.Prompt(this, "Request attributes",
+                        "Optional Name:Value pairs, one per line", "", true);
+                    if (attributes == null ||
+                        !await Confirm("Submit certificate request", open.FileName + "\r\n" + attributes)) return;
 
-                // Submit the request in the background and show the resulting disposition.
-                var result = await Task.Run(() => CaAdministration.Submit(config, open.FileName, attributes));
-                Done(result);
-                Dialogs.Report(this, "Submission result", result);
-            });
-            Action(requests, "_Import issued certificate…", async () =>
-            {
-                // Confirm the selected public certificate before importing it into the CA database.
-                var open = new FilePicker() { Filter = "Certificate|*.cer;*.crt;*.pem|All files|*.*" };
-                if (await open.ShowAsync() != true ||
-                    !await Confirm("Import certificate into the CA database", open.FileName)) return;
-                var id = await Task.Run(() => CaAdministration.Use(config,
-                    admin => admin.ImportCertificate(config, CaAdministration.ReadBase64(open.FileName), 1)));
-                Done("Imported certificate as request " + id + ".");
-            });
+                    // Submit the request in the background and show the resulting disposition.
+                    var result = await Task.Run(() => CaAdministration.Submit(config, open.FileName, attributes));
+                    Done(result);
+                    Dialogs.Report(this, "Submission result", result);
+                });
+                Action(requests, "_Import issued certificate…", async () =>
+                {
+                    // Confirm the selected public certificate before importing it into the CA database.
+                    var open = new FilePicker() { Filter = "Certificate|*.cer;*.crt;*.pem|All files|*.*" };
+                    if (await open.ShowAsync() != true ||
+                        !await Confirm("Import certificate into the CA database", open.FileName)) return;
+                    var id = await Task.Run(() => CaAdministration.Use(config,
+                        admin => admin.ImportCertificate(config, CaAdministration.ReadBase64(open.FileName), 1)));
+                    Done("Imported certificate as request " + id + ".");
+                });
+            }
 
             // Link request administration to the dedicated CRL publication tab.
             Dialogs.Note(panel, "Certificate revocation lists");
             var crls = new WrapPanel();
             panel.Children.Add(crls);
-            Action(crls, "Generate / publish / export _CRLs…", () =>
+            Action(crls, allAuthorities ? "Generate / publish _CRLs…" : "Generate / publish / export _CRLs…", () =>
             {
                 tabs.SelectedIndex = 1;
                 return Task.CompletedTask;
@@ -217,10 +270,19 @@ namespace Certitude
             panel.Children.Add(service);
             foreach (var verb in new[] { "Status", "Start", "Stop", "Restart" })
             {
+                if (allAuthorities && verb != "Status") continue;
                 Action(service, verb, async () =>
                 {
+                    if (verb == "Status")
+                    {
+                        var report = await ForAuthorities(config =>
+                            new TimeReport(CaAdministration.Service(config, verb)));
+                        Done("Service status collected. Review the report for errors or skipped CAs.");
+                        Dialogs.Report(this, "Certificate Services status", report);
+                        return;
+                    }
                     // Confirm service changes before executing them on the selected CA host.
-                    if (verb != "Status" && !await Confirm(verb + " Certificate Services",
+                    if (!await Confirm(verb + " Certificate Services",
                         "This affects certificate issuance on the selected server.")) return;
                     Done(await Task.Run(() => CaAdministration.Service(config, verb)));
                 });
@@ -233,8 +295,9 @@ namespace Certitude
         {
             // Collect CRL type, optional next-update time, and republication mode.
             var panel = Page("C_RLs");
-            Dialogs.Note(panel, "Generate new CRLs and publish them to this CA's configured locations. " +
-                "Delta publication requires delta CRLs to be enabled on the CA.");
+            Dialogs.Note(panel, "Generate new CRLs and publish them to each CA's configured locations. " +
+                "Delta publication requires delta CRLs to be enabled on each CA. " +
+                "An empty next-update time uses each CA's own defaults.");
             var kind = new ComboBox { ItemsSource = new[] { "Base CRLs", "Delta CRLs", "Base And Delta CRLs" },
                 SelectedIndex = 0, Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
             panel.Children.Add(kind);
@@ -266,23 +329,32 @@ namespace Certitude
                 var action = (flags & 0x10) != 0 ? "Republish existing " : "Generate and publish new ";
                 if (!await Confirm(action + kind.SelectedItem, () => "Next update: " +
                     (date.HasValue ? TimeDisplay.Stamp(date) : "CA defaults") +
-                    "\r\nApplies to the CA's current and unexpired renewed signing certificates.")) return;
+                    "\r\nApplies to each CA's current and unexpired renewed signing certificates.")) return;
 
                 // Show the publication report so per-location failures remain visible.
-                var report = await Task.Run(() => CaAdministration.PublishCrls(config, flags, date));
-                Done("CRL publication call completed. Review the publication report for errors.");
+                var report = await ForAuthorities(config =>
+                    new TimeReport(CaAdministration.PublishCrls(config, flags, date)));
+                Done("CRL publication finished. Review the report for errors or skipped CAs.");
                 record(report);
                 Dialogs.Report(this, "CRL publication results", report);
             });
             Action(controls, "Publication _status…", async () =>
             {
                 // Read and display the CA-reported CRL publication status.
-                var report = await Task.Run(() => CaAdministration.Use(config,
-                    admin => CaAdministration.CrlPublicationStatus(config, admin)));
-                Done("CRL publication status loaded.");
+                var report = await ForAuthorities(config => new TimeReport(CaAdministration.Use(config,
+                    admin => CaAdministration.CrlPublicationStatus(config, admin))));
+                Done("CRL publication status collected. Review the report for errors or skipped CAs.");
                 record(report);
                 Dialogs.Report(this, "CRL publication status", report);
             });
+
+            if (allAuthorities)
+            {
+                Dialogs.Note(panel, "Connect to one CA to inspect, compare or export an individual CRL. " +
+                    "A successful publication call alone does not confirm that clients can download " +
+                    "every distribution point.");
+                return;
+            }
 
             // Select the signing certificate index and CRL type for inspection or export.
             Dialogs.Note(panel, "Inspect or export a CRL for one CA signing certificate. " +

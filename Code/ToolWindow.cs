@@ -6,6 +6,7 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -16,6 +17,8 @@ namespace Certitude
     internal sealed class ToolWindow : WorkspacePage
     {
         private readonly string config;
+        private readonly string[] configurations;
+        private readonly bool allAuthorities;
         private readonly Action<string> record;
         private readonly TextBox folder;
         private readonly PasswordBox password;
@@ -25,41 +28,53 @@ namespace Certitude
         private readonly StringBuilder pending = new StringBuilder();
         private readonly object outputLock = new object();
         private readonly DispatcherTimer timer;
+        private readonly Button cancel;
+        private CancellationTokenSource cancellation;
         private bool busy;
 
-        public ToolWindow(string configuration, Action<string> log)
+        public ToolWindow(CertificateStore store, Action<string> log)
         {
-            // Bind the maintenance workspace to the selected CA and explain its execution scope.
-            config = configuration;
+            // Snapshot the connected targets and expose only operations supported by their scope.
+            config = store.Configuration;
+            configurations = store.Configurations;
+            allAuthorities = store.IsAllAuthorities;
             record = log;
             Title = "Advanced Tools — " + config;
             var layout = new DockPanel { Margin = new Thickness(8) };
             editor = new StackPanel();
             DockPanel.SetDock(editor, Dock.Top);
             layout.Children.Add(editor);
-            Dialogs.Note(editor, "Choose a maintenance operation. Database, backup and configuration operations " +
-                "require this machine's active CA and administrator rights. Connectivity checks support remote CAs.");
+            Dialogs.Note(editor, allAuthorities ? "Check connectivity to every connected CA, including CAs " +
+                "unavailable to certificate queries. Connect to one CA for backups and local database maintenance.\n" +
+                string.Join("\n", configurations) : "Choose a maintenance operation. Database, backup and " +
+                "configuration operations require this machine's active CA and administrator rights. " +
+                "Connectivity checks support remote CAs.");
 
-            // Collect the destination folder and optional private-key backup password.
-            folder = Dialogs.Field(editor, "Backup / Results Parent Folder (Existing Local Folder)",
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), width: 640);
-            editor.Children.Add(new TextBlock { Text = "Private-Key Backup Password (CA And Private Key Backup Only)",
-                Margin = new Thickness(0, 5, 0, 3) });
-            password = new PasswordBox { MaxWidth = 380, HorizontalAlignment = HorizontalAlignment.Left };
-            password.Width = 380;
-            editor.Children.Add(password);
+            if (!allAuthorities)
+            {
+                // Collect the destination folder and optional private-key backup password.
+                folder = Dialogs.Field(editor, "Backup / Results Parent Folder (Existing Local Folder)",
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), width: 640);
+                editor.Children.Add(new TextBlock { Text = "Private-Key Backup Password (CA And Private Key Backup Only)",
+                    Margin = new Thickness(0, 5, 0, 3) });
+                password = new PasswordBox { MaxWidth = 380, HorizontalAlignment = HorizontalAlignment.Left };
+                password.Width = 380;
+                editor.Children.Add(password);
+            }
 
             // Expose the supported maintenance operations with their descriptions.
             var actions = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
             editor.Children.Add(actions);
             foreach (MaintenanceOperation operation in Enum.GetValues(typeof(MaintenanceOperation)))
             {
+                if (allAuthorities && operation != MaintenanceOperation.Health) continue;
                 var button = Dialogs.Button(actions, CaMaintenance.Caption(operation), async () => await Execute(operation));
                 button.Tag = operation;
                 button.ToolTip = CaMaintenance.Description(operation);
             }
             // Keep operation status and output export controls beneath the maintenance form.
-            Dialogs.Note(editor, "Each operation shows its target, destination and downtime before making changes. " +
+            if (!allAuthorities) Dialogs.Note(editor,
+                "Each operation shows its target, destination and downtime before making changes. " +
                 "Compaction creates a backup first. Offline maintenance must finish before leaving this page.");
             var footer = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
             DockPanel.SetDock(footer, Dock.Bottom);
@@ -68,6 +83,14 @@ namespace Certitude
             footer.Children.Add(status);
             var controls = new WrapPanel();
             footer.Children.Add(controls);
+            cancel = Dialogs.Button(controls, "Cancel Remaining CAs", () =>
+            {
+                cancellation?.Cancel();
+                cancel.IsEnabled = false;
+                status.Text = "Cancelling after the current CA connectivity checks finish…";
+            });
+            cancel.IsEnabled = false;
+            cancel.Visibility = allAuthorities ? Visibility.Visible : Visibility.Collapsed;
             Dialogs.Button(controls, "_Save Visible Output", async () =>
             {
                 // Save the visible maintenance output to the selected text file.
@@ -95,7 +118,8 @@ namespace Certitude
             {
                 if (!busy) return;
                 e.Cancel = true;
-                status.Text = "Wait For Maintenance To Finish And Certificate Services To Be Restored.";
+                status.Text = cancellation != null ? "Wait for the current CA connectivity checks to finish." :
+                    "Wait For Maintenance To Finish And Certificate Services To Be Restored.";
             };
         }
 
@@ -117,13 +141,33 @@ namespace Certitude
         private async Task Execute(MaintenanceOperation operation)
         {
             // Prevent overlapping maintenance and capture the backup password for this operation.
-            if (busy) return;
+            if (busy || allAuthorities && operation != MaintenanceOperation.Health) return;
             using var cursor = BusyCursor.Enter();
             busy = true;
             editor.IsEnabled = false;
-            var secret = password.Password;
+            var secret = password?.Password;
             try
             {
+                if (operation == MaintenanceOperation.Health)
+                {
+                    // Keep remote checks independent and retain their output when another CA fails.
+                    output.Clear();
+                    timer.Start();
+                    status.Text = "Checking CA connectivity…";
+                    using var request = new CancellationTokenSource();
+                    cancellation = request;
+                    cancel.IsEnabled = true;
+                    var report = await Task.Run(() => CaAdministration.RunAuthorities(configurations, target =>
+                    {
+                        var plan = CaMaintenance.Prepare(operation, target, null);
+                        CaMaintenance.Execute(plan, null, Queue);
+                        return new TimeReport("Connectivity checks completed.");
+                    }, request.Token, Queue));
+                    Queue(report.ToString());
+                    status.Text = "Connectivity checks finished. Review the output for errors or skipped CAs.";
+                    return;
+                }
+
                 // Prepare the target and destination, then confirm the concrete maintenance plan.
                 status.Text = "Preparing " + CaMaintenance.Caption(operation) + "…";
                 var directory = folder.Text;
@@ -152,6 +196,8 @@ namespace Certitude
                 // Flush remaining output, clear backup credentials, and restore the editor.
                 timer.Stop();
                 Drain();
+                cancellation = null;
+                cancel.IsEnabled = false;
                 if (operation == MaintenanceOperation.BackupCa) password.Clear();
                 busy = false;
                 editor.IsEnabled = true;

@@ -273,6 +273,7 @@ namespace Certitude
             new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase);
 
         public virtual string Configuration { get; }
+        internal virtual string[] Configurations => new[] { Configuration };
         internal virtual bool IsAllAuthorities => false;
         internal virtual string SearchStatus => LoadedOids?.Status ?? "OID Names Not Loaded";
         internal virtual void PrepareProgress(SearchProgress progress) => progress.For(Configuration);
@@ -1129,6 +1130,7 @@ namespace Certitude
             new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private const string NoAuthorities = "No CAs could be queried. Connect to All CAs again to retry.";
         public override string Configuration => CaDirectory.AllAuthorities;
+        internal override string[] Configurations => authorities.Select(source => source.Configuration).ToArray();
         internal override bool IsAllAuthorities => true;
         internal int AuthorityCount => authorities.Length;
         internal int UnavailableCount => unavailable.Count;
