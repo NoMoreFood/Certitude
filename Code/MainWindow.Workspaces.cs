@@ -370,8 +370,64 @@ namespace Certitude
             forget.IsEnabled = workspaceWritable;
             connectionsPanel.Children.Add(connections);
             tabs.Items.Add(new TabItem { Header = "Connections", Content = connectionsPanel });
+            // Keep a dismissed publication reminder discoverable in the workspace preferences.
+            var preferences = new StackPanel { Margin = new Thickness(8) };
+            var publicationPrompt = new CheckBox
+            {
+                Content = "Offer CRL _Publication After Revocation Or Hold Release",
+                IsChecked = savedWorkspace.PromptForCrlPublication, IsEnabled = workspaceWritable
+            };
+            publicationPrompt.Click += (sender, args) =>
+            {
+                savedWorkspace.PromptForCrlPublication = publicationPrompt.IsChecked == true;
+                PersistWorkspace();
+            };
+            preferences.Children.Add(publicationPrompt);
+            tabs.Items.Add(new TabItem { Header = "Preferences", Content = preferences });
             manager.Content = tabs;
             Navigate(manager);
+        }
+
+        private async Task OfferCrlPublication(string[] affected)
+        {
+            // Offer publication only for CAs with confirmed revocation changes, preserving the operation report.
+            var prompt = new WorkspacePage { Owner = this, Title = "Publish CRLs For Affected CAs" };
+            var layout = new DockPanel { Margin = new Thickness(8) };
+            var footer = new StackPanel();
+            DockPanel.SetDock(footer, Dock.Bottom);
+            layout.Children.Add(footer);
+            var suppress = new CheckBox
+            {
+                Content = "_Don't Show This Message Again", IsEnabled = workspaceWritable,
+                Margin = new Thickness(0, 8, 0, 8),
+                ToolTip = "Change this later in Manage Saved Views And Connections / Preferences."
+            };
+            footer.Children.Add(suppress);
+            var actions = new WrapPanel();
+            footer.Children.Add(actions);
+            Dialogs.Button(actions, "_Review Publication…", () => prompt.DialogResult = true);
+            Dialogs.Button(actions, "_Not Now", prompt.Close);
+            layout.Children.Add(new TextBox
+            {
+                IsReadOnly = true, TextWrapping = TextWrapping.Wrap, AcceptsReturn = true,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalContentAlignment = VerticalAlignment.Top,
+                Text = "Revocation changes completed on these CAs:\r\n\r\n" + string.Join("\r\n", affected) +
+                    "\r\n\r\nPublish CRLs to distribute the changes. Review publication lets you choose base or " +
+                    "delta CRLs and confirm these targets before publishing."
+            });
+            prompt.Content = layout;
+            var publish = await prompt.ShowAsync() == true;
+            if (suppress.IsChecked == true)
+            {
+                savedWorkspace.PromptForCrlPublication = false;
+                PersistWorkspace();
+            }
+            if (!publish) return;
+
+            // Open the existing publication form with the affected targets captured independently of the browser.
+            var targets = affected.Select(config => new CertificateStore(config)).ToArray();
+            CertificateStore publicationStore = targets.Length == 1 ? targets[0] : new AllCertificateStore(targets);
+            new AdministrationWindow(publicationStore, Record, true) { Owner = this }.Show();
         }
 
         private static bool IsColumnHeader(DependencyObject source)

@@ -136,6 +136,9 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="AdministrationButton" Content="_Administration" Click="AdministrationClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />
+            <Button x:Name="CrlHealthButton" Content="CRL _Health" Click="CrlHealthClick"
+                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
             <Button x:Name="ToolsButton" Content="Advanced _Tools" Click="ToolsClick"
                     HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
                     local:Glyphs.Icon="{x:Static local:Glyphs.More}" />

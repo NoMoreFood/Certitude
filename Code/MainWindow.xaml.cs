@@ -558,7 +558,8 @@ namespace Certitude
             Views.IsEnabled = FilterPanel.IsEnabled = store != null && !busy;
             ActionsPanel.IsEnabled = !working && !filtersDirty && Certificates.SelectedItems.Count > 0;
             ExportButton.IsEnabled = !working && !filtersDirty && query != null;
-            AdministrationButton.IsEnabled = ToolsButton.IsEnabled = !working && store != null;
+            AdministrationButton.IsEnabled = ToolsButton.IsEnabled =
+                CrlHealthButton.IsEnabled = !working && store != null;
             StatisticsButton.IsEnabled = !working && store != null && !store.IsAllAuthorities;
             StatisticsButton.Visibility = store?.IsAllAuthorities == true ? Visibility.Collapsed : Visibility.Visible;
             if (autoAuthorityColumn)
@@ -884,13 +885,14 @@ namespace Certitude
                         (effective.HasValue ? TimeDisplay.Stamp(effective) : "immediately") + "." : detail))) return;
 
                 // Apply the confirmed changes with selection-wide progress and an operation report.
+                var affected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 await Run(action + "…", async token =>
                 {
                     var progress = new Progress<int>(count =>
                         StatusText.Text = $"{action}: {count:N0}/{selected.Length:N0}");
                     var report = await Task.Run(() => source.Apply(selected,
                         action, reason, effective, attributes, token,
-                        count => ((IProgress<int>)progress).Report(count)));
+                        count => ((IProgress<int>)progress).Report(count), config => affected.Add(config)));
                     Record(report);
                     Dialogs.Report(this, "Operation results", report);
                 });
@@ -902,6 +904,8 @@ namespace Certitude
                     filtersDirty = true;
                     await LoadPage(query, null, 0, true);
                 }
+                if (affected.Count > 0 && savedWorkspace.PromptForCrlPublication)
+                    await OfferCrlPublication(affected.ToArray());
             }
             catch (Exception error) { ShowError(error); }
         }
@@ -1017,6 +1021,12 @@ namespace Certitude
             // Let the maintenance page restrict combined connections to connectivity checks.
             if (busy || queryLoads > 0 || store == null) return;
             Navigate(new ToolWindow(store, Record));
+        }
+
+        private void CrlHealthClick(object sender, RoutedEventArgs e)
+        {
+            if (busy || queryLoads > 0 || store == null) return;
+            Navigate(new CrlHealthPage(store));
         }
 
         private void ValidationClick(object sender, RoutedEventArgs e) =>

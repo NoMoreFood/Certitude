@@ -25,6 +25,9 @@ namespace Certitude
         public byte[] Encoded { get; set; }
         public TimeReport Details { get; set; }
         public bool? SignatureValid { get; set; }
+        public bool? SignerAllowsCrlSigning { get; set; }
+        public string SignerThumbprint { get; set; }
+        public byte[] IssuingDistributionPoint { get; set; }
         public bool ScopeMatches { get; set; }
         public bool IssuerMatches { get; set; }
         public bool Current { get; set; }
@@ -338,6 +341,8 @@ namespace Certitude
                     Issuer = issuer.Name, EntryCount = info.EntryCount,
                     ThisUpdate = info.ThisUpdate == 0 ? null : DateTime.FromFileTimeUtc(info.ThisUpdate),
                     NextUpdate = info.NextUpdate == 0 ? null : DateTime.FromFileTimeUtc(info.NextUpdate),
+                    IssuingDistributionPoint = extensions.FirstOrDefault(e => e.Oid.Value == "2.5.29.28")?.RawData ??
+                        Array.Empty<byte>(),
                     Number = numberText
                 };
 
@@ -363,21 +368,6 @@ namespace Certitude
                     text.AppendLine("  Direct issuer match: " + result.IssuerMatches);
                     text.AppendLine("  Distribution-point scope check: " + result.ScopeMatches);
 
-                    // Verify the CRL signature using available certificates with a matching issuer name.
-                    var signers = issuers.Where(item => SameName(item.SubjectName.RawData, issuer.RawData)).ToArray();
-                    var signer = signers.FirstOrDefault(item => CryptVerifyCertificateSignatureEx(IntPtr.Zero, 1, 3,
-                        crl.DangerousGetHandle(), 2, item.Handle, 0, IntPtr.Zero));
-                    result.SignatureValid = signers.Length == 0 ? (bool?)null : signer != null;
-                    text.AppendLine("  Signature: " + (result.SignatureValid == true ? "Verified" :
-                        result.SignatureValid == false ? "INVALID" : "Unknown — CRL signer certificate not available"));
-                    if (signer != null)
-                    {
-                        // Report whether the verified signer permits CRL signing.
-                        var usage = signer.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();
-                        text.AppendLine("  Signer: " + signer.Subject + " (" + signer.Thumbprint + ")");
-                        text.AppendLine("  Signer CRL-sign usage: " + (usage == null ? "Unrestricted" :
-                            ((usage.KeyUsages & X509KeyUsageFlags.CrlSign) != 0 ? "Allowed" : "NOT allowed")));
-                    }
                     // Locate the certificate serial in this particular CRL.
                     if (!CertFindCertificateInCRL(certificate.Handle, crl.DangerousGetHandle(), 0,
                         IntPtr.Zero, out var entry)) throw NativeError();
@@ -392,6 +382,23 @@ namespace Certitude
                             text.Append("  Entry " + names.Describe(extension.Oid.Value, 6) + ": ")
                                 .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
                     }
+                }
+                // Verify signatures even when inspecting a CA's CRL without a particular issued certificate.
+                var signers = (issuers ?? Array.Empty<X509Certificate2>())
+                    .Where(item => SameName(item.SubjectName.RawData, issuer.RawData)).ToArray();
+                var signer = signers.FirstOrDefault(item => CryptVerifyCertificateSignatureEx(IntPtr.Zero, 1, 3,
+                    crl.DangerousGetHandle(), 2, item.Handle, 0, IntPtr.Zero));
+                result.SignatureValid = signers.Length == 0 ? (bool?)null : signer != null;
+                text.AppendLine("  Signature: " + (result.SignatureValid == true ? "Verified" :
+                    result.SignatureValid == false ? "INVALID" : "Unknown — CRL signer certificate not available"));
+                if (signer != null)
+                {
+                    var usage = signer.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();
+                    result.SignerThumbprint = signer.Thumbprint;
+                    result.SignerAllowsCrlSigning = usage == null || (usage.KeyUsages & X509KeyUsageFlags.CrlSign) != 0;
+                    text.AppendLine("  Signer: " + signer.Subject + " (" + signer.Thumbprint + ")");
+                    text.AppendLine("  Signer CRL-sign usage: " +
+                        (result.SignerAllowsCrlSigning == true ? "Allowed" : "NOT allowed"));
                 }
                 // Append decoded CRL extensions to the inspection report.
                 foreach (var extension in extensions)
@@ -439,7 +446,7 @@ namespace Certitude
             }
         }
 
-        private static string[] DeltaUrls(IntPtr certificate, byte[] bytes)
+        internal static string[] DeltaUrls(IntPtr certificate, byte[] bytes)
         {
             // Pair the certificate and base CRL when asking Windows for delta locations.
             using (var crl = CertCreateCRLContext(1, bytes, bytes.Length))
@@ -451,6 +458,10 @@ namespace Certitude
                 return Urls(pair.Pointer, 7);
             }
         }
+
+        internal static bool SignedBy(X509Certificate2 certificate, X509Certificate2 issuer) =>
+            SameName(certificate.IssuerName.RawData, issuer.SubjectName.RawData) &&
+            CryptVerifyCertificateSignatureEx(IntPtr.Zero, 1, 2, certificate.Handle, 2, issuer.Handle, 0, IntPtr.Zero);
 
         internal static List<byte[]> RetrieveCrls(string url, bool offline, int timeoutSeconds)
         {

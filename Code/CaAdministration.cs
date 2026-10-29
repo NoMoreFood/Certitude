@@ -141,83 +141,88 @@ namespace Certitude
             (Convert.ToInt32(admin.GetCAProperty(config, 39, certificateIndex, 1, 0)) >> 16) & 0xffff;
 
         public static string Apply(string config, IReadOnlyList<CertificateRow> rows, string action, int reason,
-            DateTime? effective, string attributes, CancellationToken token, Action<int> progress)
+            DateTime? effective, string attributes, CancellationToken token, Action<int> progress,
+            Action<string> revocationChanged = null) => Use(config, admin =>
+                Apply(admin, config, rows, action, reason, effective, attributes, token, progress, revocationChanged));
+
+        internal static string Apply(ICertAdmin admin, string config, IReadOnlyList<CertificateRow> rows,
+            string action, int reason, DateTime? effective, string attributes, CancellationToken token,
+            Action<int> progress, Action<string> revocationChanged)
         {
-            return Use(config, admin =>
+            // Track requests independently so bulk changes can continue after a row fails.
+            var report = new StringBuilder();
+            var completed = 0;
+            var failed = 0;
+            foreach (var row in rows)
             {
-                // Track requests independently so bulk changes can continue after a row fails.
-                var report = new StringBuilder();
-                var completed = 0;
-                var failed = 0;
-                foreach (var row in rows)
+                if (token.IsCancellationRequested) break;
+                try
                 {
-                    if (token.IsCancellationRequested) break;
-                    try
+                    var result = "Completed";
+                    switch (action)
                     {
-                        var result = "Completed";
-                        switch (action)
-                        {
-                            // Report the actual resubmission outcome instead of assuming issuance.
-                            case "Issue":
-                                if (row.Disposition != 9 && row.Disposition != 31)
-                                    throw new InvalidOperationException(
-                                        "Only pending or denied requests can be resubmitted.");
-                                var disposition = admin.ResubmitRequest(config, row.RequestId);
-                                result = RequestDisposition(disposition);
-                                if (disposition != 3 && disposition != 4) failed++;
-                                break;
+                        // Report the actual resubmission outcome instead of assuming issuance.
+                        case "Issue":
+                            if (row.Disposition != 9 && row.Disposition != 31)
+                                throw new InvalidOperationException(
+                                    "Only pending or denied requests can be resubmitted.");
+                            var disposition = admin.ResubmitRequest(config, row.RequestId);
+                            result = RequestDisposition(disposition);
+                            if (disposition != 3 && disposition != 4) failed++;
+                            break;
 
-                            // Deny only requests still waiting for a CA decision.
-                            case "Deny":
-                                if (row.Disposition != 9)
-                                    throw new InvalidOperationException("The request is not pending.");
-                                admin.DenyRequest(config, row.RequestId);
-                                break;
+                        // Deny only requests still waiting for a CA decision.
+                        case "Deny":
+                            if (row.Disposition != 9)
+                                throw new InvalidOperationException("The request is not pending.");
+                            admin.DenyRequest(config, row.RequestId);
+                            break;
 
-                            // Revoke issued serials and note that CRL publication distributes the change.
-                            case "Revoke":
-                                if (row.Disposition != 20 || string.IsNullOrEmpty(row.SerialNumber))
-                                    throw new InvalidOperationException("The certificate is not issued.");
-                                admin.RevokeCertificate(config, row.SerialNumber, reason, effective?.ToOADate() ?? 0);
-                                result = "Revoked; publish a CRL to distribute the change";
-                                break;
+                        // Revoke issued serials and note that CRL publication distributes the change.
+                        case "Revoke":
+                            if (row.Disposition != 20 || string.IsNullOrEmpty(row.SerialNumber))
+                                throw new InvalidOperationException("The certificate is not issued.");
+                            admin.RevokeCertificate(config, row.SerialNumber, reason, effective?.ToOADate() ?? 0);
+                            revocationChanged?.Invoke(config);
+                            result = "Revoked; publish a CRL to distribute the change";
+                            break;
 
-                            // Allow reinstatement only for certificates revoked for certificate hold.
-                            case "Release hold":
-                                if (row.Disposition != 21 || row.RevocationReason != 6)
-                                    throw new InvalidOperationException("Only certificates on hold can be reinstated.");
-                                admin.RevokeCertificate(config, row.SerialNumber, -1, 0);
-                                result = "Hold released; publish a CRL to distribute the change";
-                                break;
+                        // Allow reinstatement only for certificates revoked for certificate hold.
+                        case "Release hold":
+                            if (row.Disposition != 21 || row.RevocationReason != 6)
+                                throw new InvalidOperationException("Only certificates on hold can be reinstated.");
+                            admin.RevokeCertificate(config, row.SerialNumber, -1, 0);
+                            revocationChanged?.Invoke(config);
+                            result = "Hold released; publish a CRL to distribute the change";
+                            break;
 
-                            // Delete the database row without treating deletion as revocation.
-                            case "Delete":
-                                result = admin.DeleteRow(config, 0, 0, 0, row.RequestId) + " row(s) deleted";
-                                break;
+                        // Delete the database row without treating deletion as revocation.
+                        case "Delete":
+                            result = admin.DeleteRow(config, 0, 0, 0, row.RequestId) + " row(s) deleted";
+                            break;
 
-                            // Limit attribute edits to pending requests that can still use them.
-                            case "Set attributes":
-                                if (row.Disposition != 9)
-                                    throw new InvalidOperationException("The request is not pending.");
-                                admin.SetRequestAttributes(config, row.RequestId, attributes);
-                                break;
-                            default: throw new ArgumentException("Unknown request action.");
-                        }
-                        report.AppendLine($"{row.RequestId}: {result}");
+                        // Limit attribute edits to pending requests that can still use them.
+                        case "Set attributes":
+                            if (row.Disposition != 9)
+                                throw new InvalidOperationException("The request is not pending.");
+                            admin.SetRequestAttributes(config, row.RequestId, attributes);
+                            break;
+                        default: throw new ArgumentException("Unknown request action.");
                     }
-                    // Record failures and advance progress without aborting unrelated requests.
-                    catch (Exception error)
-                    {
-                        failed++;
-                        report.AppendLine($"{row.RequestId}: FAILED — {Error(error)}");
-                    }
-                    completed++;
-                    if (completed % 50 == 0 || completed == rows.Count) progress(completed);
+                    report.AppendLine($"{row.RequestId}: {result}");
                 }
-                // Summarize completed and unattempted requests, including cancellation between rows.
-                return $"{action} on {config}\r\n{completed:N0} attempted; {failed:N0} failed or not issued; " +
+                // Record failures and advance progress without aborting unrelated requests.
+                catch (Exception error)
+                {
+                    failed++;
+                    report.AppendLine($"{row.RequestId}: FAILED — {Error(error)}");
+                }
+                completed++;
+                if (completed % 50 == 0 || completed == rows.Count) progress?.Invoke(completed);
+            }
+            // Summarize completed and unattempted requests, including cancellation between rows.
+            return $"{action} on {config}\r\n{completed:N0} attempted; {failed:N0} failed or not issued; " +
                     $"{rows.Count - completed:N0} not attempted.\r\n\r\n" + report;
-            });
         }
 
         public static string RequestDisposition(int value)

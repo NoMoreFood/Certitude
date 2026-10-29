@@ -31,7 +31,7 @@ namespace Certitude
         private CancellationTokenSource cancellation;
         private bool busy;
 
-        public AdministrationWindow(CertificateStore store, Action<string> log)
+        public AdministrationWindow(CertificateStore store, Action<string> log, bool publicationOnly = false)
         {
             // Snapshot the connected targets, including CAs unavailable to certificate queries.
             config = store.Configuration;
@@ -39,7 +39,7 @@ namespace Certitude
             allAuthorities = store.IsAllAuthorities;
             oidNames = new Lazy<OidNames>(() => store.LoadedOids ?? OidNames.Load(config));
             record = log;
-            Title = "Administration — " + config;
+            Title = publicationOnly ? "CRL Publication — Affected CAs" : "Administration — " + config;
             var layout = new DockPanel { Margin = new Thickness(8) };
             var footer = new DockPanel { Margin = new Thickness(0, 14, 0, 0) };
             DockPanel.SetDock(footer, Dock.Bottom);
@@ -57,9 +57,9 @@ namespace Certitude
             Content = layout;
 
             // Build the operation tabs and prevent navigation during an active CA call.
-            BuildOperations();
+            if (!publicationOnly) BuildOperations();
             BuildCrls();
-            if (!allAuthorities)
+            if (!allAuthorities && !publicationOnly)
             {
                 BuildProperties();
                 BuildConfiguration();

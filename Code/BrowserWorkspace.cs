@@ -168,6 +168,7 @@ namespace Certitude
     public sealed class BrowserWorkspace
     {
         public bool UseUtc { get; set; }
+        public bool PromptForCrlPublication { get; set; } = true;
         internal static readonly string[] ColumnKeys =
         {
             "RequestId", "Configuration", "CommonName", "Status", "Requester", "Template",

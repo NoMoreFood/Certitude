@@ -311,12 +311,14 @@ namespace Certitude
         }
 
         internal virtual string Apply(IReadOnlyList<CertificateRow> rows, string action, int reason,
-            DateTime? effective, string attributes, CancellationToken token, Action<int> progress)
+            DateTime? effective, string attributes, CancellationToken token, Action<int> progress,
+            Action<string> revocationChanged = null)
         {
             // Validate every record destination before submitting the requested operation.
             foreach (var row in rows) ForRow(row);
             token.ThrowIfCancellationRequested();
-            return CaAdministration.Apply(Configuration, rows, action, reason, effective, attributes, token, progress);
+            return CaAdministration.Apply(Configuration, rows, action, reason, effective, attributes, token,
+                progress, revocationChanged);
         }
 
         internal virtual CertificatePage ReadBrowserPage(QuerySpec query, CertificateRow before,
@@ -1312,7 +1314,8 @@ namespace Certitude
         }
 
         internal override string Apply(IReadOnlyList<CertificateRow> rows, string action, int reason,
-            DateTime? effective, string attributes, CancellationToken token, Action<int> progress)
+            DateTime? effective, string attributes, CancellationToken token, Action<int> progress,
+            Action<string> revocationChanged = null)
         {
             // Resolve every record to its CA before applying any grouped changes.
             var groups = rows.GroupBy(ForRow).ToArray();
@@ -1326,7 +1329,7 @@ namespace Certitude
                 {
                     // Apply each CA group while reporting progress across the whole selection.
                     report.AppendLine(group.Key.Apply(selected, action, reason, effective, attributes, token,
-                        count => progress?.Invoke(completed + count)));
+                        count => progress?.Invoke(completed + count), revocationChanged));
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception error)
