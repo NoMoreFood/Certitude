@@ -23,7 +23,9 @@ Run on Windows with Desktop Experience, .NET Framework 4.7.2+ and AD CS manageme
 
 Select a discovered CA and **Connect**, refresh discovery with **Find CAs**, or enter `SERVER\CA name`. The local CA is detected automatically; directory failures do not prevent manual connections. Remote access requires AD CS client components, permissions and working DCOM/RPC. Service control and maintenance may require elevation.
 
-**All CAs** combines listed authorities, including successful remembered manual connections. Searches, sorting, paging and export span them; record actions use each row's CA, since request IDs are not globally unique. Unreachable CAs are skipped with a persistent notice and error tooltip; reconnect to retry them or update the authority list. If none are reachable, the query fails. **Administration**, **Advanced Tools** and **Statistics** require a single CA; enrollment requires an explicit target.
+**All CAs** combines listed authorities, including successful remembered manual connections. Searches, sorting, paging and export span them; record actions use each row's CA, since request IDs are not globally unique. Unreachable CAs are skipped with a persistent notice and error tooltip; reconnect to retry them or update the authority list. If none are reachable, the query fails.
+
+**Administration** supports CRL publication, publication status, CA information, database schemas and service status across All CAs. **Advanced Tools** provides connectivity checks, and **CRL Health** checks each CA. Configuration changes, template publication, request submission, certificate import, service start/stop/restart and individual CRL inspection/export require one CA. **Statistics** also requires one CA; enrollment requires an explicit target.
 
 ### Saved workspace and views
 
@@ -47,13 +49,15 @@ Saves are atomic. Invalid settings remain untouched with a warning; close Certit
 
 **Add OID** registers an assigned application/issuance policy OID, rejecting invalid syntax and forest duplicates. It does not allocate an OID arc or edit templates. **Remove OID** confirms the target and rechecks references, blocking template/forest OIDs, protected objects and policies referenced by templates or AD groups. External use and unreplicated changes cannot be detected; issued certificates are unchanged. See [AD policy types](https://techcommunity.microsoft.com/blog/askds/the-certificate-template-manager-hangs-indefinitely/396078).
 
-## Published certificates
+## Published certificates and CRLs
 
-**Forest Published** manages NTAuth, trusted root CA, AIA/intermediate, cross-certificate, KRA and Enrollment Services certificates. Load the current domain or a specified DNS domain/controller independently of the CA selector. Search certificates, inspect their AD location, export DER/PEM or open the Windows viewer. Expired and unreadable values remain visible. User/computer publications and CRLs are excluded.
+**Forest Published** manages NTAuth, trusted root CA, AIA/intermediate, cross-certificate, KRA and Enrollment Services certificates, plus base CRLs, delta CRLs and authority revocation lists. Load the current domain or a specified DNS domain/controller independently of the CA selector. Search published values, inspect their AD location, export certificates as DER/PEM or CRLs as `.crl`, and open certificates in the Windows viewer. Expired and unreadable values remain visible. User/computer publications are excluded.
 
 **Add Certificate** previews one public certificate and confirms its target and trust purpose. CA stores require CA basic constraints; KRA requires its EKU. Duplicates are rejected. Enrollment Services accepts existing objects only and does not configure CAs/templates. Cross-certificates are added as forward pairs.
 
-**Remove** rechecks the object and original value, preserving other certificates, the opposite pair member, objects and service settings. AD permissions and replication apply. Removal does not revoke certificates or clear client caches. See the [directory specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/ad150321-4b89-4802-8713-6c7a51cc0b84) and [publication commands](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil#-dspublish).
+**Add CRL** previews a DER/PEM CRL for an existing publication object. Publishing a base CRL replaces the reviewed base value; delta CRLs and authority revocation lists are added as values. This view reports CRL contents and update times without checking signatures or certificate revocation status; use **Certificate / CRL Check** for validation.
+
+**Remove** rechecks the object and original value, preserving other published values, the opposite certificate-pair member, objects and service settings. AD permissions and replication apply. Removal does not revoke certificates or clear client caches. See the [directory specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/ad150321-4b89-4802-8713-6c7a51cc0b84) and [publication commands](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil#-dspublish).
 
 ## Certificate browser
 
@@ -63,7 +67,9 @@ Views cover issued, pending, revoked, failed, denied and all records. **Dark Mod
 
 **Back / Escape** returns through inline pages with inputs preserved; leaving a confirmation cancels it. Active operations must finish or cancel first. File selection supports local/UNC paths and shows up to 5,000 entries; full paths select other files.
 
-Row menus and **More Actions** expose applicable details, export, validation, issue/resubmit, deny, revoke, release-hold and attribute/extension actions. Issued records support encrypted archived-key retrieval. Bulk changes confirm CA/IDs and report individual outcomes. Only certificate hold can be reversed; publish CRLs separately after revocation changes.
+Row menus and **More Actions** expose applicable details, export, validation, issue/resubmit, deny, revoke, release-hold and attribute/extension actions. Issued records support encrypted archived-key retrieval. Bulk changes confirm CA/IDs and report individual outcomes. Only certificate hold can be reversed.
+
+After a successful revocation or hold release, Certitude offers CRL publication for only the CAs with completed changes. **Review Publication** opens the publication form to choose base/delta CRLs and confirm those targets; **Not Now** dismisses the offer. **Don't Show This Message Again** saves the preference, including when dismissing the offer. To restore it, enable **Offer CRL Publication After Revocation Or Hold Release** under **Manage Saved Views And Connections / Preferences**. Publication remains available in **Administration / CRLs**.
 
 **Delete From Database is permanent**, including attributes, extensions and archived keys. It neither revokes certificates nor removes store copies; deleting revoked records can remove them from future CRLs. Filtering alone deletes nothing. Operation results are transient, not a retained audit history.
 
@@ -183,19 +189,27 @@ Windows CryptoAPI reports chain trust and revocation separately, including unkno
 
 ## Generating and publishing CRLs
 
-In **Administration / CRLs**, publish base CRLs (default), deltas or both. Leave next update blank for CA defaults, or enter a future UTC time; the CA may round/limit it. **Republish existing CRLs** redistributes existing lists without generating contents and cannot override expiry.
+Connect to one CA or **All CAs**, then open **Administration / CRLs** to publish base CRLs (default), deltas or both. Review the target CAs before confirming. Leave next update blank for each CA's defaults, or enter a future UTC time; the CA may round/limit it. Delta publication requires deltas to be enabled on each target. **Republish Existing CRLs Instead Of Generating New Ones** redistributes existing lists without generating contents and cannot override expiry.
 
-Publication covers current and unexpired renewed signing certificates. Read publication status or inspect/export base/delta CRLs by signing-certificate index. Reports expose publication failures; check CDPs afterward to verify client reachability.
+Publication covers each CA's current and unexpired renewed signing certificates. **Publication Status** works for one CA or All CAs and reports failures per CA. Connect to one CA to inspect/export a base or delta CRL by signing-certificate index. A successful publication call does not establish client reachability; use **CRL Health** to check sampled distribution points.
+
+## CRL health
+
+**CRL Health** checks one CA or **All CAs**, showing CA signing-certificate expiry, base/delta CRL update times and signatures, and CA-reported publication status. Disabled delta publication and unavailable checks are identified separately. Select a row for details, **Refresh** to repeat the checks, or **View Report** to inspect and save the results. Cancellation keeps completed results and waits for the current native call to return.
+
+Distribution-point downloads run from this computer using the newest issued certificate from each CA, including delta locations advertised by that certificate or its base CRLs. Results distinguish current CRLs that match or differ from the CA snapshot; unavailable comparisons are explicit. Coverage is limited to these sampled locations; older certificates may reference other endpoints. Missing certificates or URLs leave distribution points unchecked. Use **Certificate / CRL Check** for full certificate-chain and revocation validation.
 
 ## Administration and maintenance
 
 **Administration** provides CA information, access mask/schema, indexed CA/KRA properties, configuration entries, template publication, request submission/certificate import and service status/start/stop/restart. Use native Windows tools for template definitions, removing all published templates, restore, CA renewal and custom commands.
 
-**Advanced Tools** reviews the target and effects before these operations:
+With **All CAs**, supported administration actions and connectivity checks attempt every listed CA independently, including CAs unavailable to certificate queries. Reports retain each CA's outcome. **Cancel Remaining CAs** stops after the current native call; failures and cancellation do not undo completed changes.
+
+**Advanced Tools** offers **Check CA Connectivity** for All CAs. Connect to one CA for the remaining operations; each reviews its target and effects before running:
 
 | Operation | Effect |
 | --- | --- |
-| Check CA Connectivity | Check request/admin interfaces and CA information; supports remote CAs. |
+| Check CA Connectivity | Check request/admin interfaces and CA information for one CA or All CAs; supports remote CAs. |
 | Back Up Database | Full online database/configuration backup; preserve transaction logs. |
 | Back Up And Truncate Logs | Full backup, then CA-managed truncation of backed-up logs. |
 | Back Up CA And Private Key | Include the signing certificate and exportable key in a password-protected backup. HSM keys require provider procedures. |
