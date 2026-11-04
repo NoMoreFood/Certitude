@@ -125,25 +125,22 @@ namespace Certitude
             new PublishedStore("ARL", "Authority Revocation Lists", "", "authorityRevocationList",
                 "cRLDistributionPoint", "Changes revocation lists for CA certificates at this AD publication location.")
         };
-        public string Server { get; }
-        public string ConfigurationName { get; }
+        public string Server => oidDirectory.Server;
+        public string ConfigurationName => oidDirectory.ConfigurationName;
         private readonly OidDirectory oidDirectory;
         internal OidNames Names => OidNames.Load(oidDirectory);
         internal string ServicesName => "CN=Public Key Services,CN=Services," + ConfigurationName;
 
-        private PublishedDirectory(string server, string configuration, OidDirectory directory)
+        private PublishedDirectory(OidDirectory directory)
         {
             // Keep publication and OID reads bound to the same controller and forest.
             oidDirectory = directory;
-            Server = server;
-            ConfigurationName = configuration;
         }
 
         public static PublishedDirectory Connect(string target = "")
         {
             // Resolve the requested forest before creating a publication connection.
-            var directory = OidDirectory.Connect(target);
-            return new PublishedDirectory(directory.Server, directory.ConfigurationName, directory);
+            return new PublishedDirectory(OidDirectory.Connect(target));
         }
 
         internal LdapConnection Open()

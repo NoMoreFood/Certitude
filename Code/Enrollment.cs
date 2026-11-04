@@ -115,7 +115,8 @@ namespace Certitude
                 // Submit a new request or retrieve the existing request while retaining the CA disposition.
                 var request = scope.Value;
                 var disposition = requestBytes == null ? request.RetrievePending(requestId, configuration) :
-                    request.Submit(0x101, Convert.ToBase64String(DecodeRequest(requestBytes)),
+                    request.Submit(0x101, Convert.ToBase64String(CertificateUtilities.DecodeObject(
+                        requestBytes, "CERTIFICATE REQUEST", "NEW CERTIFICATE REQUEST")),
                         template.Length == 0 ? "" : "CertificateTemplate:" + template, configuration);
                 var result = new EnrollmentResult { Disposition = disposition, RequestId = request.GetRequestId() };
                 result.Report = $"CA: {configuration}\r\nRequest {result.RequestId}: " +
@@ -134,22 +135,6 @@ namespace Certitude
                 }
                 return result;
             }
-        }
-
-        internal static byte[] DecodeRequest(byte[] bytes)
-        {
-            // Accept standard PEM request labels and reject malformed request armor.
-            var text = Encoding.ASCII.GetString(bytes).Trim();
-            if (text.StartsWith("-----BEGIN", StringComparison.Ordinal))
-            {
-                var match = Regex.Match(text,
-                    @"\A-----BEGIN ((?:NEW )?CERTIFICATE REQUEST)-----([A-Za-z0-9+/=\s]+)" +
-                    @"-----END \1-----\z");
-                if (!match.Success) throw new ArgumentException("Select a PKCS #10 certificate request.");
-                return Convert.FromBase64String(match.Groups[2].Value);
-            }
-            // Decode bare base64 requests while allowing existing DER bytes through unchanged.
-            return Regex.IsMatch(text, @"\A[A-Za-z0-9+/=\s]+\z") ? Convert.FromBase64String(text) : bytes;
         }
 
         public static async Task<string> CreateRequest(string inf, string path, CancellationToken token)

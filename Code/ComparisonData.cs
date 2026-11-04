@@ -15,7 +15,6 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace Certitude
@@ -147,19 +146,8 @@ namespace Certitude
             token.ThrowIfCancellationRequested();
             if (encoded == null || encoded.Length == 0 || encoded.Length > 32 * 1024 * 1024)
                 throw new InvalidDataException("Select a nonempty public certificate, CSR or CRL up to 32 MB.");
-            var bytes = encoded;
-            var text = Encoding.ASCII.GetString(bytes).Trim();
-            if (text.StartsWith("-----BEGIN", StringComparison.Ordinal))
-            {
-                var match = Regex.Match(text, @"\A-----BEGIN (CERTIFICATE|(?:NEW )?CERTIFICATE REQUEST|" +
-                    @"X509 CRL|PKCS7|CMS)-----([A-Za-z0-9+/=\s]+)-----END \1-----\z");
-                if (!match.Success) throw new InvalidDataException(
-                    "Select one public certificate, CSR or CRL. " +
-                    "For a certificate bundle, select a certificate in Certificate Manager.");
-                bytes = Convert.FromBase64String(match.Groups[2].Value);
-            }
-            else if (Regex.IsMatch(text, @"\A[A-Za-z0-9+/=\s]+\z")) bytes = Convert.FromBase64String(text);
-
+            var bytes = CertificateUtilities.DecodeObject(encoded, "CERTIFICATE", "CERTIFICATE REQUEST",
+                "NEW CERTIFICATE REQUEST", "X509 CRL", "PKCS7", "CMS");
             var root = ComparisonDer.Parse(bytes);
             var parts = root.Children(0x30);
             if (parts.Length > 0 && parts[0].Tag == 6)

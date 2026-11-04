@@ -28,13 +28,13 @@ namespace Certitude
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
         private readonly Button cancel;
         private readonly ComboBox location = new ComboBox
-            { ItemsSource = new[] { "Local Machine", "Current User" }, SelectedIndex = 0, Width = 125 };
+            { ItemsSource = new[] { "Local Machine", "Current User" }, SelectedIndex = 0, MinWidth = 125 };
         private readonly ComboBox storeName = new ComboBox
-            { ItemsSource = CertificateUtilities.StoreNames, SelectedIndex = 0, Width = 125 };
+            { ItemsSource = CertificateUtilities.StoreNames, SelectedIndex = 0, MinWidth = 125 };
         private readonly TextBox search = new TextBox { Width = 235 };
-        private readonly ComboBox validity = new ComboBox { Width = 145, SelectedIndex = 0,
+        private readonly ComboBox validity = new ComboBox { MinWidth = 145, SelectedIndex = 0,
             ItemsSource = new[] { "All Dates", "Expired", "Expires In 30 Days", "Expires In 90 Days", "Not Yet Valid" } };
-        private readonly ComboBox keys = new ComboBox { Width = 135, SelectedIndex = 0,
+        private readonly ComboBox keys = new ComboBox { MinWidth = 135, SelectedIndex = 0,
             ItemsSource = new[] { "Any Key Status", "Has Private Key", "No Private Key" } };
         private readonly DataGrid inventory = new DataGrid { SelectionMode = DataGridSelectionMode.Extended };
         private readonly WrapPanel inventoryActions = new WrapPanel();
@@ -194,6 +194,8 @@ namespace Certitude
                     var messageText = CaAdministration.Error(error);
                     status.Text = messageText.Replace("\r", "").Split('\n')[0];
                     var output = tabs.SelectedIndex switch { 0 => details, 1 => tlsOutput, _ => enrollmentOutput };
+                    if (tabs.SelectedIndex == 1) tlsResult = null;
+                    if (tabs.SelectedIndex == 2) enrollmentResult = null;
                     output?.Text = "Operation failed\r\n\r\n" + messageText;
                 }
                 finally
@@ -222,7 +224,7 @@ namespace Certitude
                 .VerticalAlignment = VerticalAlignment.Bottom;
             Dialogs.Button(choose, "_Open file…", async () => await OpenFile())
                 .VerticalAlignment = VerticalAlignment.Bottom;
-            var import = Dialogs.Button(choose, "_Import file…", async () => await ImportFile());
+            var import = Dialogs.Button(choose, "_Import file…", async () => await OpenFile(true));
             import.VerticalAlignment = VerticalAlignment.Bottom;
             header.Children.Add(source);
 
@@ -435,48 +437,19 @@ namespace Certitude
             UpdateContextMenu();
         }
 
-        internal static Task<byte[]> ReadInput(string path, CancellationToken token) => Task.Run(() =>
-        {
-            // Read a bounded snapshot on a worker, checking cancellation between chunks.
-            return CertificateUtilities.ReadBytes(path, token: token);
-        }, token);
+        internal static Task<byte[]> ReadInput(string path, CancellationToken token) =>
+            Task.Run(() => CertificateUtilities.ReadBytes(path, token: token), token);
 
-        private async Task OpenFile()
+        private async Task OpenFile(bool import = false)
         {
-            // Choose a certificate bundle before inspecting it in memory.
-            var open = new FilePicker() { Filter = "Certificates / chains / PFX|*.cer;*.crt;*.pem;*.p7b;*.p7c;*.pfx;*.p12|All files|*.*" };
-            if (await open.ShowAsync() != true) return;
-            await Run("Opening certificate file…", async token =>
-            {
-                // Request a password only when the selected file contains a PFX.
-                var bytes = await ReadInput(open.FileName, token);
-                var password = "";
-                var pfx = await Task.Run(() => X509Certificate2.GetCertContentType(
-                    CertificateUtilities.DecodePublicPem(bytes)) == X509ContentType.Pkcs12, token);
-                token.ThrowIfCancellationRequested();
-                if (pfx)
-                {
-                    password = await Password("Open PFX", false);
-                    if (password == null) return;
-                }
-                // Show decoded file contents as a read-only inventory with no store association.
-                rows = await Task.Run(() => CertificateUtilities.ReadFile(bytes, password, token, oids), token);
-                loadedStore = null;
-                source.Text = "File: " + open.FileName + " · read only";
-                ApplyFilters();
-                status.Text = "File loaded. Private keys were opened in memory; nothing was installed.";
-            });
-        }
-
-        private async Task ImportFile()
-        {
-            // Capture the import destination before preparing a review of the selected file.
-            var open = new FilePicker() { Filter = "Certificates / chains / PFX|*.cer;*.crt;*.pem;*.p7b;*.p7c;*.pfx;*.p12" };
+            // Capture the destination before inspecting the selected bundle in memory.
+            var open = new FilePicker { Filter = "Certificates / chains / PFX|" +
+                "*.cer;*.crt;*.pem;*.p7b;*.p7c;*.pfx;*.p12" + (import ? "" : "|All files|*.*") };
             if (await open.ShowAsync() != true) return;
             var target = Location;
             var name = (string)storeName.SelectedItem;
             var imported = false;
-            await Run("Reading import file…", async token =>
+            await Run(import ? "Reading import file…" : "Opening certificate file…", async token =>
             {
                 // Decode the bundle in memory before any certificates or keys are installed.
                 var bytes = await ReadInput(open.FileName, token);
@@ -484,8 +457,23 @@ namespace Certitude
                 var pfx = await Task.Run(() => X509Certificate2.GetCertContentType(
                     CertificateUtilities.DecodePublicPem(bytes)) == X509ContentType.Pkcs12, token);
                 token.ThrowIfCancellationRequested();
-                if (pfx) { password = await Password("Import PFX", false); if (password == null) return; }
+                if (pfx)
+                {
+                    password = await Password(import ? "Import PFX" : "Open PFX", false);
+                    if (password == null) return;
+                }
                 var preview = await Task.Run(() => CertificateUtilities.ReadFile(bytes, password, token, oids), token);
+
+                // Show decoded file contents as a read-only inventory with no store association.
+                if (!import)
+                {
+                    rows = preview;
+                    loadedStore = null;
+                    source.Text = "File: " + open.FileName + " · read only";
+                    ApplyFilters();
+                    status.Text = "File loaded. Private keys were opened in memory; nothing was installed.";
+                    return;
+                }
 
                 // Explain the exact destination and trust impact in the import review page.
                 var dialog = new WorkspacePage { Owner = this, Title = "Review Certificate Import" };
@@ -566,7 +554,7 @@ namespace Certitude
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
         }
 
-        private async Task PrivateKeyTest() => await Run("Testing private key access…", async token =>
+        private Task PrivateKeyTest() => Run("Testing private key access…", async token =>
         {
             // Require an installed key and confirm the signing challenge before testing access.
             var selected = Selected();
@@ -693,7 +681,7 @@ namespace Certitude
             if (changed) await Reload();
         }
 
-        private async Task Export() => await Run("Exporting certificate…", async token =>
+        private Task Export() => Run("Exporting certificate…", async token =>
         {
             // Choose an export format for a nonempty certificate selection.
             var selected = inventory.SelectedItems.Cast<InventoryCertificate>().ToArray();
@@ -808,7 +796,7 @@ namespace Certitude
             Dialogs.ScrollHeader(page, header);
         }
 
-        private async Task CheckEndpoint() => await Run("Connecting and validating TLS…", async token =>
+        private Task CheckEndpoint() => Run("Connecting and validating TLS…", async token =>
         {
             // Clear the prior endpoint result and capture validated connection settings.
             tlsResult = null;
@@ -960,7 +948,7 @@ namespace Certitude
             ClientAuthentication = clientAuth.IsChecked == true
         };
 
-        private async Task CreateCsr() => await Run("Creating certificate request…", async token =>
+        private Task CreateCsr() => Run("Creating certificate request…", async token =>
         {
             // Validate request settings and confirm key creation before generating the CSR.
             var options = Options();
@@ -972,12 +960,15 @@ namespace Certitude
                 "?\r\n\r\n" + inf)) return;
 
             // Keep the generated CSR path ready for submission and show the creation output.
+            enrollmentResult = null;
+            enrollmentOutput.Clear();
+            requestId.Clear();
             enrollmentOutput.Text = await Enrollment.CreateRequest(inf, save.FileName, token);
             requestPath.Text = save.FileName;
             status.Text = "CSR created. The private key remains in Windows; submit the request when ready.";
         });
 
-        private async Task SendRequest(bool retrieve) => await Run(
+        private Task SendRequest(bool retrieve) => Run(
             retrieve ? "Retrieving request…" : "Submitting request…", async token =>
         {
             // Validate the CA target and request ID or file before submitting or retrieving.
@@ -1018,6 +1009,8 @@ namespace Certitude
             await Run("Accepting certificate response…", async token =>
             {
                 // Accept the response through certreq and explain where to inspect the installed key pair.
+                enrollmentResult = null;
+                enrollmentOutput.Clear();
                 enrollmentOutput.Text = await Enrollment.RunCertReq("-accept -q " + context + " " +
                     ToolWindow.QuoteArgument(Path.GetFullPath(open.FileName)), token);
                 status.Text = "Response accepted. Reload the Personal store to inspect the certificate and key.";

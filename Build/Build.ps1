@@ -40,7 +40,6 @@ try
     {
         throw 'StageDirectory must be a child folder of the Build directory.'
     }
-    if (Test-Path -LiteralPath $StageDirectory) { Remove-Item -LiteralPath $StageDirectory -Recurse -Force }
     foreach ($protectedDirectory in @($BinaryDirectory, $OutputDirectory))
     {
         $protectedPrefix = $protectedDirectory.TrimEnd('\') + '\'

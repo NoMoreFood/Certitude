@@ -4,9 +4,9 @@
 //
 
 using System;
-using System.IO;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -139,7 +139,7 @@ namespace Certitude
                 if (downloaded.SelectedItem is not CrlResult selected) return;
                 var save = new FilePicker(true) { FileName = selected.IsDelta ? "delta.crl" : "base.crl", Filter = "CRL|*.crl" };
                 if (await save.ShowAsync() != true) return;
-                try { File.WriteAllBytes(save.FileName, selected.Encoded); }
+                try { CertificateUtilities.WriteAtomic(save.FileName, selected.Encoded); }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
             saveCrl.IsEnabled = false;
@@ -152,7 +152,7 @@ namespace Certitude
                 if (output.Text.Length == 0) return;
                 var save = new FilePicker(true) { FileName = "Certificate-validation.txt", Filter = "Text|*.txt" };
                 if (await save.ShowAsync() != true) return;
-                try { File.WriteAllText(save.FileName, output.Text); }
+                try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(output.Text)); }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
 

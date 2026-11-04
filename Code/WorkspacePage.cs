@@ -118,7 +118,7 @@ namespace Certitude
     {
         private readonly bool save;
         private readonly TextBox folder = new TextBox { Width = 420, Margin = new Thickness(0, 0, 8, 4) };
-        private readonly TextBox names = new TextBox { Width = 640, HorizontalAlignment = HorizontalAlignment.Left };
+        private readonly TextBox names = new TextBox();
         private readonly ComboBox formats = new ComboBox { Width = 240, Margin = new Thickness(0, 0, 8, 4) };
         private readonly DataGrid files = new DataGrid { SelectionMode = DataGridSelectionMode.Single };
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };

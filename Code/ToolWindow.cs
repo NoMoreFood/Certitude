@@ -96,7 +96,7 @@ namespace Certitude
                 // Save the visible maintenance output to the selected text file.
                 var save = new FilePicker(true) { FileName = "Certitude-maintenance.txt", Filter = "Text|*.txt" };
                 if (await save.ShowAsync() != true) return;
-                try { File.WriteAllText(save.FileName, output.Text); }
+                try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(output.Text)); }
                 catch (Exception error) { status.Text = CaAdministration.Error(error); }
             });
 

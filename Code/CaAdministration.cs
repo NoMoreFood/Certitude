@@ -8,12 +8,10 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace Certitude
@@ -240,36 +238,11 @@ namespace Certitude
             using (var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request"))
             {
                 // Submit the normalized request and retain its identifier and native status.
-                var data = ReadBase64(path);
+                var data = Convert.ToBase64String(CertificateUtilities.ReadEncoded(path));
                 var result = request.Value.Submit(0x101, data, attributes, config);
                 return $"Request {request.Value.GetRequestId()}: {RequestDisposition(result)}\r\n" +
                     request.Value.GetDispositionMessage() + $"\r\nStatus: 0x{request.Value.GetLastStatus():X8}";
             }
-        }
-
-        public static string ReadBase64(string path, int maximumMegabytes = 32, CancellationToken token = default)
-        {
-            // Normalize DER or bare base64 input into the encoding expected by the CA interface.
-            var bytes = CertificateUtilities.ReadBytes(path, maximumMegabytes, token);
-            var text = Encoding.ASCII.GetString(bytes).Trim();
-            if (!text.StartsWith("-----BEGIN", StringComparison.Ordinal))
-            {
-                if (text.Length > 0 && Regex.IsMatch(text, @"^[A-Za-z0-9+/=\s]+$"))
-                    return Convert.ToBase64String(Convert.FromBase64String(text));
-                return Convert.ToBase64String(bytes);
-            }
-            // Require one complete PEM object with matching labels before decoding its body.
-            var headerEnd = text.StartsWith("-----BEGIN ", StringComparison.Ordinal) ?
-                text.IndexOf("-----", 11, StringComparison.Ordinal) : -1;
-            if (headerEnd < 12)
-                throw new ArgumentException("Select one complete DER or PEM object with matching headers and footers.");
-            var label = text.Substring(11, headerEnd - 11);
-            var footer = "-----END " + label + "-----";
-            if (!Regex.IsMatch(label, @"\A[A-Z0-9]+(?: [A-Z0-9]+)*\z") ||
-                !text.EndsWith(footer, StringComparison.Ordinal) || text.Length < headerEnd + 5 + footer.Length)
-                throw new ArgumentException("Select one complete DER or PEM object with matching headers and footers.");
-            var body = text.Substring(headerEnd + 5, text.Length - headerEnd - 5 - footer.Length);
-            return Convert.ToBase64String(Convert.FromBase64String(body));
         }
 
         public static void SetExtension(string config, int requestId, string oid, int flags, byte[] bytes)

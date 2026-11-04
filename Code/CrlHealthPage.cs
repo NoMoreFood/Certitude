@@ -250,7 +250,7 @@ namespace Certitude
         private readonly string[] configurations;
         private readonly ObservableCollection<CrlHealthEntry> entries = new ObservableCollection<CrlHealthEntry>();
         private readonly DataGrid grid = new DataGrid { SelectionMode = DataGridSelectionMode.Single,
-            RowHeight = double.NaN, MinRowHeight = 24 };
+            RowHeight = double.NaN, MinRowHeight = 24, ColumnHeaderHeight = double.NaN };
         private readonly TextBox details = new TextBox { IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
             AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalContentAlignment = VerticalAlignment.Top };
@@ -306,7 +306,9 @@ namespace Certitude
                     ElementStyle = wrapped, Width = new DataGridLength(1, DataGridLengthUnitType.Star),
                     MinWidth = column.Item2 == "Status" ? 160 : 115 });
             var expires = new DataGridTextColumn { Header = "Expires / Next Update (UTC)",
-                Binding = TimeDisplay.Binding("Expires"), SortMemberPath = "Expires", Width = 190 };
+                Binding = TimeDisplay.Binding("Expires"), SortMemberPath = "Expires", Width = 190,
+                ElementStyle = wrapped,
+                HeaderStyle = (Style)Application.Current.FindResource("DetailsColumnHeaderStyle") };
             TimeDisplay.Label(expires, DataGridColumn.HeaderProperty, "Expires / Next Update (UTC)");
             grid.Columns.Add(expires);
             grid.Columns.Add(new DataGridTextColumn

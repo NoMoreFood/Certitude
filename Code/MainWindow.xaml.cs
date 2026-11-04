@@ -949,9 +949,7 @@ namespace Certitude
                 if (await form.ShowAsync() != true) return;
 
                 // Validate the extension identifier, flags, and binary encoding before confirmation.
-                var oid = form.Values[0].Trim();
-                if (!System.Text.RegularExpressions.Regex.IsMatch(oid, @"^[0-2](\.\d+)+$"))
-                    throw new ArgumentException("Enter a numeric extension OID.");
+                var oid = OidDirectory.ValidateValue(form.Values[0]);
                 var flags = int.Parse(form.Values[1]);
                 if (flags < 0 || flags > 3) throw new ArgumentException("Flags must be between 0 and 3.");
                 var bytes = Convert.FromBase64String(form.Values[2]);
@@ -984,7 +982,8 @@ namespace Certitude
                 {
                     var encoded = CaAdministration.Use(configuration,
                         admin => admin.GetArchivedKey(configuration, row.RequestId, 1));
-                    File.WriteAllBytes(save.FileName, Convert.FromBase64String(encoded));
+                    token.ThrowIfCancellationRequested();
+                    CertificateUtilities.WriteAtomic(save.FileName, Convert.FromBase64String(encoded));
                 });
                 Record("Saved the encrypted recovery blob. " +
                     "A key recovery agent is required to recover the private key.");

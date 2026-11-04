@@ -55,7 +55,7 @@ namespace Certitude
         public static byte[] ReadCertificate(string path)
         {
             // Require one public certificate before returning normalized DER bytes.
-            var bytes = Convert.FromBase64String(CaAdministration.ReadBase64(path));
+            var bytes = CertificateUtilities.ReadEncoded(path);
             if (X509Certificate2.GetCertContentType(bytes) != X509ContentType.Cert)
                 throw new ArgumentException("Select a single public certificate in DER or PEM format.");
             using (var certificate = new X509Certificate2(bytes)) return certificate.RawData;
@@ -87,7 +87,7 @@ namespace Certitude
                     foreach (var path in issuers)
                     {
                         token.ThrowIfCancellationRequested();
-                        var bytes = Convert.FromBase64String(CaAdministration.ReadBase64(path, token: token));
+                        var bytes = CertificateUtilities.ReadEncoded(path, token: token);
                         var kind = X509Certificate2.GetCertContentType(bytes);
                         if (kind is not (X509ContentType.Cert or X509ContentType.Pkcs7))
                             throw new ArgumentException("Issuer files must contain public certificates or a PKCS #7 chain.");
@@ -99,7 +99,7 @@ namespace Certitude
                     foreach (var path in crls)
                     {
                         token.ThrowIfCancellationRequested();
-                        AddCrl(store, inputs, path, Convert.FromBase64String(CaAdministration.ReadBase64(path, 100, token)));
+                        AddCrl(store, inputs, path, CertificateUtilities.ReadEncoded(path, 100, token));
                     }
 
                     // Collect the certificate distribution points for reporting and optional retrieval.

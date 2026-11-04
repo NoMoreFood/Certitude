@@ -6,9 +6,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
@@ -220,7 +220,7 @@ namespace Certitude
                 // Save the report text and surface file errors through the main status area.
                 var save = new FilePicker(true) { FileName = "Certitude-log.txt", Filter = "Text|*.txt", Owner = page };
                 if (await save.ShowAsync() != true) return;
-                try { File.WriteAllText(save.FileName, output.Text); }
+                try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(output.Text)); }
                 catch (Exception error) { ((MainWindow)Application.Current.MainWindow).Notify(CaAdministration.Error(error)); }
             });
 
@@ -344,7 +344,7 @@ namespace Certitude
             var save = new FilePicker(true) { FileName = fileName,
                 Filter = "DER Certificate|*.cer|PEM Certificate|*.pem", Owner = owner };
             if (await save.ShowAsync() != true) return;
-            try { File.WriteAllBytes(save.FileName, CertificateUtilities.ExportPublic(
+            try { CertificateUtilities.WriteAtomic(save.FileName, CertificateUtilities.ExportPublic(
                 new[] { encoded }, save.FilterIndex - 1)); }
             catch (Exception error) { ((MainWindow)Application.Current.MainWindow).Notify(CaAdministration.Error(error)); }
         }

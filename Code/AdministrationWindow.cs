@@ -249,7 +249,8 @@ namespace Certitude
                     if (await open.ShowAsync() != true ||
                         !await Confirm("Import certificate into the CA database", open.FileName)) return;
                     var id = await Task.Run(() => CaAdministration.Use(config,
-                        admin => admin.ImportCertificate(config, CaAdministration.ReadBase64(open.FileName), 1)));
+                        admin => admin.ImportCertificate(config,
+                            Convert.ToBase64String(CertificateUtilities.ReadEncoded(open.FileName)), 1)));
                     Done("Imported certificate as request " + id + ".");
                 });
             }
@@ -387,7 +388,8 @@ namespace Certitude
                 var delta = exportKind.SelectedIndex == 1;
                 var save = new FilePicker(true) { FileName = delta ? "delta.crl" : "base.crl", Filter = "CRL|*.crl" };
                 if (await save.ShowAsync() != true) return;
-                await Task.Run(() => File.WriteAllBytes(save.FileName, CaAdministration.ReadCrl(config, delta, number)));
+                await Task.Run(() => CertificateUtilities.WriteAtomic(save.FileName,
+                    CaAdministration.ReadCrl(config, delta, number)));
                 Done("CRL saved to " + save.FileName);
             });
             Dialogs.Note(panel, "Use Certificate / CRL check to validate a certificate against published or local CRLs. " +

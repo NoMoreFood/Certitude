@@ -4,7 +4,7 @@ A compact x64 WPF application for Windows Certificate Services administration. U
 
 Licensed under the [GNU General Public License v3.0](LICENSE.md).
 
-![Certitude certificate browser with search, filtering, and sorted results in dark mode](Code/Assets/Certitude-Screenshot.png)
+![Certitude certificate browser in dark mode with illustrative sample records](Code/Assets/Certitude-Screenshot.png)
 
 ## Build and run
 
@@ -15,7 +15,9 @@ msbuild Code\Certitude.sln /m /p:Configuration=Release /p:Platform=x64
 .\Code\bin\Release\Certitude.exe
 ```
 
-Run on Windows with Desktop Experience, .NET Framework 4.7.2+ and AD CS management tools. Deploy `Certitude.exe` and `Certitude.exe.config` together from `Code\bin\Release`. Running on 4.8+ also enables its newer WPF accessibility, DPI and cryptography behavior.
+Run on Windows with Desktop Experience and .NET Framework 4.7.2+. Deploy `Certitude.exe` and `Certitude.exe.config` together from `Code\bin\Release`. CA operations and native consoles require AD CS client/management components; local certificate tools work independently.
+
+For display problems, set `SoftwareRendering` in `Certitude.exe.config` to `true` to use software rendering, or `false` to use WPF's normal rendering selection. The default `auto` selects software rendering in detected VMware Horizon sessions. Restart the application after changing this setting.
 
 [Build/Build.cmd](Build/Build.cmd) creates a signed portable ZIP in `Binaries`. It requires PowerShell 5.1+, Windows SDK SignTool, a code-signing certificate and timestamp-service access. It clears staging contents within `Build` and replaces an existing same-version ZIP only after building, signing and packaging succeed.
 
@@ -23,7 +25,7 @@ Run on Windows with Desktop Experience, .NET Framework 4.7.2+ and AD CS manageme
 
 Select a discovered CA and **Connect**, refresh discovery with **Find CAs**, or enter `SERVER\CA name`. The local CA is detected automatically; directory failures do not prevent manual connections. Remote access requires AD CS client components, permissions and working DCOM/RPC. Service control and maintenance may require elevation.
 
-**All CAs** combines listed authorities, including successful remembered manual connections. Searches, sorting, paging and export span them; record actions use each row's CA, since request IDs are not globally unique. Unreachable CAs are skipped with a persistent notice and error tooltip; reconnect to retry them or update the authority list. If none are reachable, the query fails.
+**All CAs** combines listed authorities, including successful remembered manual connections. Searches, sorting, paging and export span them; record actions use each row's CA, since request IDs are not globally unique. Unreachable CAs are skipped with a persistent notice and error tooltip; reconnect to retry them or update the authority list. If none are reachable, the query fails. During streaming queries and exports, a CA failure after emitting records aborts the operation.
 
 **Administration** supports CRL publication, publication status, CA information, database schemas and service status across All CAs. **Advanced Tools** provides connectivity checks, and **CRL Health** checks each CA. Configuration changes, template publication, request submission, certificate import, service start/stop/restart and individual CRL inspection/export require one CA. **Statistics** also requires one CA; enrollment requires an explicit target.
 
@@ -41,7 +43,11 @@ Saves are atomic. Invalid settings remain untouched with a warning; close Certit
 
 ### Native Windows consoles
 
-**Native CA MMC** and **Native Templates MMC**, below **Statistics**, launch the installed Windows consoles under your identity. They need AD CS management tools, not a Certitude connection, and manage their targets independently. Certitude neither elevates nor installs components for them.
+**CA MMC** and **Templates MMC**, below **Statistics**, launch the installed Windows consoles under your identity. They need AD CS management tools, not a Certitude connection, and manage their targets independently. Certitude neither elevates nor installs components for them.
+
+### Sidebar links
+
+**Links / Add Link** adds a named HTTP/HTTPS website, local folder or network share. Environment variables are supported; relative folders resolve beside the executable. Links are saved in `Certitude.exe.config`, so that file and its folder must be writable. To rename or remove a link, edit its `Link:` entry in the configuration and restart Certitude.
 
 ## OID Manager
 
@@ -55,13 +61,15 @@ Saves are atomic. Invalid settings remain untouched with a warning; close Certit
 
 **Add Certificate** previews one public certificate and confirms its target and trust purpose. CA stores require CA basic constraints; KRA requires its EKU. Duplicates are rejected. Enrollment Services accepts existing objects only and does not configure CAs/templates. Cross-certificates are added as forward pairs.
 
-**Add CRL** previews a DER/PEM CRL for an existing publication object. Publishing a base CRL replaces the reviewed base value; delta CRLs and authority revocation lists are added as values. This view reports CRL contents and update times without checking signatures or certificate revocation status; use **Certificate / CRL Check** for validation.
+**Add CRL** previews a DER, base64 or PEM CRL for an existing publication object. Publishing a base CRL replaces the reviewed base value; delta CRLs and authority revocation lists are added as values. This view reports CRL contents and update times without checking signatures or certificate revocation status; use **Certificate / CRL Check** for validation.
 
 **Remove** rechecks the object and original value, preserving other published values, the opposite certificate-pair member, objects and service settings. AD permissions and replication apply. Removal does not revoke certificates or clear client caches. See the [directory specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-wcce/ad150321-4b89-4802-8713-6c7a51cc0b84) and [publication commands](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil#-dspublish).
 
 ## Certificate browser
 
 Views cover issued, pending, revoked, failed, denied and all records. **Dark Mode / Light Mode** is saved in `%LOCALAPPDATA%\Certitude\theme.txt`.
+
+Times display in the local time zone by default. **Show Times In UTC** changes displayed times, date inputs and GUI exports; the preference is saved with the workspace. Inputs without an explicit offset use the selected time zone. Command-line exports always use UTC.
 
 ### Navigation and record actions
 
@@ -77,15 +85,23 @@ Right-click preserves an existing bulk selection or selects the clicked row; emp
 
 ### Search, sorting and export
 
-- Search is case-insensitive, defaults to **All Fields / Contains**, and spans all matching pages. **Exact** on one field and expiry bounds are fastest for large CAs; contains/prefix searches may scan every candidate.
+- Search is case-insensitive, defaults to **Common Name / Contains**, and spans all matching pages. Saved workspace settings restore the selected fields and match mode. **Exact** on one field and expiry bounds are fastest for large CAs; contains/prefix searches may scan every candidate.
 - Changes apply after 400 ms, reset to page one and cancel superseded queries. Refresh applies immediately. Pages contain 500-25,000 records (default 1,000); a centered indicator appears while records load.
-- Expiry dates accept `yyyy-MM-dd`, with UTC inclusive-start/exclusive-end bounds. Presets select expired or upcoming 7/30/60/90-day issued certificates.
+- Expiry dates accept `yyyy-MM-dd` or a date and time in the selected time zone, with inclusive-start/exclusive-end bounds. Presets select expired or upcoming 7/30/60/90-day issued certificates.
 - Column sorting spans all matching records, using numeric IDs, chronological dates and case-insensitive text. Ties use descending request ID, then CA name. Blanks sort first ascending, last descending.
-- Newest-first retains one page; other sorts cache all matching metadata. Certificate bodies load on demand. **Export CSV** streams all matches with bounded memory and preserves existing output on failure/cancellation. CSV cells are quoted and formula-like text is protected.
+- Sorting by Request ID in either direction retains one page; other sorts cache all matching metadata. Certificate bodies load on demand. **Export CSV** streams all matches with bounded memory and preserves existing output on failure/cancellation. CSV cells are quoted and formula-like text is protected.
 
 Template searches match display/internal names and OIDs; sorting uses display names. Statistics combine aliases of the same template, not distinct templates with matching labels. Cached names come from the CA's forest and Windows, with numeric fallbacks and visible lookup errors. Refresh reloads names; other operations reuse them for up to five minutes, retrying failures after 30 seconds. Policy categories remain distinct. Offline checks avoid directory lookups; the native viewer uses Windows' resolver.
 
 Queries are live, not transactionally consistent snapshots. Cancellation waits for active native calls and never reverses completed changes.
+
+### Comparison
+
+**Comparison** aligns certificate, CSR, template and CRL properties between a **Basis** and a **Comparison** source. Choose a file, locate a certificate/request or base/delta CRL on a CA, or select a directory template. Context menus also offer **Use As Comparison Basis** and **Compare With Basis** where supported. Certificate and CSR fields align for request-to-issuance checks; missing properties remain distinct from empty values.
+
+Files accept one public certificate, PKCS #10 CSR or CRL up to 32 MB in DER, base64 or PEM form. A signed request must contain exactly one PKCS #10 CSR. For a certificate bundle, open it in **Certificate Manager** and choose a certificate there.
+
+Sources remain snapshots until **Refresh** reloads them. **Differences Only**, **Show Encoding** and search filter the table; **Swap** exchanges the sources. Select a row to inspect its full values, or **Export CSV** to save the visible rows. Comparison does not validate signatures, trust or effective permissions.
 
 ### Statistics
 
@@ -189,7 +205,7 @@ Windows CryptoAPI reports chain trust and revocation separately, including unkno
 
 ## Generating and publishing CRLs
 
-Connect to one CA or **All CAs**, then open **Administration / CRLs** to publish base CRLs (default), deltas or both. Review the target CAs before confirming. Leave next update blank for each CA's defaults, or enter a future UTC time; the CA may round/limit it. Delta publication requires deltas to be enabled on each target. **Republish Existing CRLs Instead Of Generating New Ones** redistributes existing lists without generating contents and cannot override expiry.
+Connect to one CA or **All CAs**, then open **Administration / CRLs** to publish base CRLs (default), deltas or both. Review the target CAs before confirming. Leave next update blank for each CA's defaults, or enter a future time in the selected time zone; the CA may round/limit it. Delta publication requires deltas to be enabled on each target. **Republish Existing CRLs Instead Of Generating New Ones** redistributes existing lists without generating contents and cannot override expiry.
 
 Publication covers each CA's current and unexpired renewed signing certificates. **Publication Status** works for one CA or All CAs and reports failures per CA. Connect to one CA to inspect/export a base or delta CRL by signing-certificate index. A successful publication call does not establish client reachability; use **CRL Health** to check sampled distribution points.
 

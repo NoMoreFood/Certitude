@@ -515,29 +515,23 @@ namespace Certitude
             UpdateChecks();
         }
 
-        private static ProcessStartInfo NativeConsoleStartInfo(bool templates)
-        {
-            // Use fixed Windows paths and console names, with no user-controlled command arguments.
-            var system = Environment.SystemDirectory;
-            return new ProcessStartInfo
-            {
-                FileName = Path.Combine(system, "mmc.exe"),
-                Arguments = "\"" + Path.Combine(system, templates ? "certtmpl.msc" : "certsrv.msc") + "\"",
-                WorkingDirectory = system, UseShellExecute = true
-            };
-        }
-
         private void LaunchNativeConsole(bool templates)
         {
             // Report missing management tools without attempting installation or forced elevation.
             try
             {
-                var start = NativeConsoleStartInfo(templates);
-                var console = Path.Combine(Environment.SystemDirectory, templates ? "certtmpl.msc" : "certsrv.msc");
-                if (!File.Exists(start.FileName) || !File.Exists(console))
+                var system = Environment.SystemDirectory;
+                var console = Path.Combine(system, templates ? "certtmpl.msc" : "certsrv.msc");
+                var executable = Path.Combine(system, "mmc.exe");
+                if (!File.Exists(executable) || !File.Exists(console))
                     throw new FileNotFoundException("The native " + (templates ? "Certificate Templates" :
                         "Certification Authority") + " console is not installed. Enable the Windows AD CS management tools.");
-                using var process = Process.Start(start);
+
+                // Use fixed Windows paths and console names, with no user-controlled command arguments.
+                using var process = Process.Start(new ProcessStartInfo(executable, "\"" + console + "\"")
+                {
+                    WorkingDirectory = system, UseShellExecute = true
+                });
                 Record("Opened native " + (templates ? "Certificate Templates" : "Certification Authority") +
                     " MMC. Its target is managed independently of Certitude.");
             }

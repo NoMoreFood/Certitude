@@ -217,6 +217,26 @@ namespace Certitude
             finally { foreach (var certificate in certificates) certificate.Dispose(); }
         }
 
+        internal static byte[] ReadEncoded(string path, int maximumMegabytes = 32, CancellationToken token = default) =>
+            DecodeObject(ReadBytes(path, maximumMegabytes, token));
+
+        internal static byte[] DecodeObject(byte[] bytes, params string[] labels)
+        {
+            // Normalize one public artifact while leaving content validation to its typed reader.
+            using var reader = new StreamReader(new MemoryStream(bytes), Encoding.ASCII, true);
+            var text = reader.ReadToEnd().Trim();
+            if (!text.StartsWith("-----BEGIN", StringComparison.Ordinal))
+                return Regex.IsMatch(text, @"\A[A-Za-z0-9+/=\s]+\z") ? Convert.FromBase64String(text) : bytes;
+
+            // Require complete armor and preserve each caller's supported object labels.
+            var match = Regex.Match(text,
+                @"\A-----BEGIN ([A-Z0-9]+(?: [A-Z0-9]+)*)-----([A-Za-z0-9+/=\s]+)-----END \1-----\z");
+            if (!match.Success || labels.Length > 0 && !labels.Contains(match.Groups[1].Value))
+                throw new ArgumentException("Select one complete DER, base64 or PEM object with a supported label " +
+                    "and matching footer.");
+            return Convert.FromBase64String(match.Groups[2].Value);
+        }
+
         private static List<InventoryCertificate> DescribeAll(X509Certificate2Collection certificates,
             CancellationToken token, OidNames names)
         {
@@ -233,19 +253,29 @@ namespace Certitude
         public static byte[] DecodePublicPem(byte[] bytes)
         {
             // Recognize public PEM blocks while rejecting unsupported private-key PEM input.
-            var text = Encoding.ASCII.GetString(bytes).Trim();
+            using var reader = new StreamReader(new MemoryStream(bytes), Encoding.ASCII, true);
+            var text = reader.ReadToEnd().Trim();
             if (!text.StartsWith("-----BEGIN", StringComparison.Ordinal)) return bytes;
             var matches = Regex.Matches(text,
-                @"-----BEGIN (CERTIFICATE|PKCS7)-----([A-Za-z0-9+/=\s]+)-----END \1-----");
-            if (matches.Count == 0 || text.Contains("PRIVATE KEY"))
+                @"\G\s*-----BEGIN (CERTIFICATE|PKCS7)-----([A-Za-z0-9+/=\s]+)-----END \1-----\s*");
+            if (matches.Count == 0 || matches.Cast<Match>().Sum(match => match.Length) != text.Length)
                 throw new ArgumentException("Use a certificate/PKCS #7 PEM file, or a PFX for private keys.");
-            if (matches.Count == 1) return Convert.FromBase64String(matches[0].Groups[2].Value);
 
             // Combine multiple public PEM blocks into a single importable PKCS #7 payload.
             var collection = new X509Certificate2Collection();
             try
             {
-                foreach (Match match in matches) collection.Import(Convert.FromBase64String(match.Groups[2].Value));
+                foreach (Match match in matches)
+                {
+                    // Validate the payload before importing so public armor cannot conceal a private-key container.
+                    var encoded = Convert.FromBase64String(match.Groups[2].Value);
+                    var expected = match.Groups[1].Value == "CERTIFICATE" ?
+                        X509ContentType.Cert : X509ContentType.Pkcs7;
+                    if (X509Certificate2.GetCertContentType(encoded) != expected)
+                        throw new ArgumentException("The PEM contents do not match the public certificate label.");
+                    if (matches.Count == 1) return encoded;
+                    collection.Import(encoded, null, X509KeyStorageFlags.EphemeralKeySet);
+                }
                 return collection.Export(X509ContentType.Pkcs7);
             }
             finally { foreach (var certificate in collection) certificate.Dispose(); }

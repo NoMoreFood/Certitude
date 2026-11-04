@@ -21,7 +21,7 @@ using System.Xml;
 
 namespace Certitude
 {
-    internal static class WorkflowChecks
+    internal static partial class WorkflowChecks
     {
         private static readonly Dictionary<string, byte[]> fixtures = new Dictionary<string, byte[]>();
         private static readonly string[] targets = { "one\\CA One", "two\\CA Two", "three\\CA Three" };
@@ -32,14 +32,19 @@ namespace Certitude
         {
             try
             {
+                // Render previews even when the unattended runner has no connected display.
+                AppContext.SetSwitch(
+                    "Switch.System.Windows.Media.ShouldRenderEvenWhenNoDisplayDevicesAreAvailable", true);
+                RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
                 var document = new XmlDocument();
                 document.Load(Path.Combine(args[0], "Tests", "CrlFixtures.xml"));
                 foreach (XmlElement element in document.DocumentElement.ChildNodes)
                     fixtures.Add(element.Name, Convert.FromBase64String(element.InnerText));
                 CheckRevocations();
                 var entries = CheckHealth();
+                CheckReleasePaths(args[0]);
                 CheckWorkspace(args[0], entries);
-                Console.WriteLine("CRL workflow checks passed; no live CA or network calls were made.");
+                Console.WriteLine("Release workflow checks passed; no live CA or network calls were made.");
                 return 0;
             }
             catch (Exception error) { Console.Error.WriteLine(error); return 1; }
@@ -158,7 +163,7 @@ namespace Certitude
         private static void CheckWorkspace(string repository, List<CrlHealthEntry> entries)
         {
             // Isolate all persistence and UI checks from the user's workspace and from CA discovery.
-            var output = Path.Combine(repository, "Code", "obj", "CrlWorkflowChecks");
+            var output = Path.Combine(repository, "Build", "Temp", "CrlWorkflowChecks");
             var path = Path.Combine(output, "workspace-" + Guid.NewGuid().ToString("N") + ".xml");
             typeof(BrowserWorkspace).GetField("DefaultPath", BindingFlags.Static | BindingFlags.NonPublic)
                 .SetValue(null, path);
@@ -222,6 +227,7 @@ namespace Certitude
             Render(window, Path.Combine(output, "crl-health-150.png"), 1.5);
             App.ApplyTheme(true, false);
             Render(window, Path.Combine(output, "crl-health-dark.png"), 1);
+            CheckReleaseViews(window, output);
             File.Delete(path);
             File.Delete(path + ".lock");
             app.Shutdown();
@@ -240,8 +246,10 @@ namespace Certitude
         private static void Complete(Task task)
         {
             // Let asynchronous workspace continuations finish without blocking their dispatcher.
+            var deadline = DateTime.UtcNow.AddSeconds(15);
             while (!task.IsCompleted)
             {
+                Assert(DateTime.UtcNow < deadline, "The workspace operation did not complete within 15 seconds.");
                 var frame = new DispatcherFrame();
                 Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Background,
                     new Action(() => frame.Continue = false));
@@ -249,13 +257,15 @@ namespace Certitude
             }
             task.GetAwaiter().GetResult();
         }
-        private static void Render(MainWindow window, string path, double scale)
+        private static void Render(MainWindow window, string path, double scale, double width = 900, double height = 620)
         {
             var root = (FrameworkElement)window.Content;
             root.LayoutTransform = new ScaleTransform(scale, scale);
-            var size = new Size(900 * scale, 620 * scale);
+            var size = new Size(width * scale, height * scale);
             root.Measure(size);
             root.Arrange(new Rect(size));
+            root.UpdateLayout();
+            window.Dispatcher.Invoke(new Action(() => { }), DispatcherPriority.ContextIdle);
             root.UpdateLayout();
             var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32);
             var background = new DrawingVisual();
@@ -263,6 +273,10 @@ namespace Certitude
                 drawing.DrawRectangle(window.Background, null, new Rect(size));
             bitmap.Render(background);
             bitmap.Render(root);
+            var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+            bitmap.CopyPixels(pixels, bitmap.PixelWidth * 4, 0);
+            Assert(pixels.Where((value, index) => index % 4 != 3).Distinct().Count() > 20,
+                "The workspace preview is blank.");
             var encoder = new PngBitmapEncoder();
             encoder.Frames.Add(BitmapFrame.Create(bitmap));
             using var stream = File.Create(path);

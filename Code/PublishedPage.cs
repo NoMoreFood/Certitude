@@ -4,11 +4,8 @@
 //
 
 using System;
-using System.IO;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -381,7 +378,7 @@ namespace Certitude
             if (await save.ShowAsync() != true) return;
             await Run("Exporting Published Value…", async () =>
             {
-                await Task.Run(() => File.WriteAllBytes(save.FileName, row.Encoded));
+                await Task.Run(() => CertificateUtilities.WriteAtomic(save.FileName, row.Encoded));
                 status.Text = "Exported To " + save.FileName;
             });
         }
@@ -477,19 +474,9 @@ namespace Certitude
                 var path = file.Text.Trim();
                 var bytes = await Task.Run(() =>
                 {
-                    var info = new FileInfo(path);
-                    if (!info.Exists || info.Length == 0 || info.Length > 32 * 1024 * 1024)
-                        throw new ArgumentException("Select a " + store.ItemName + " file no larger than 32 MB.");
                     var data = CertificateUtilities.ReadBytes(path);
-                    if (!store.IsCrl) return CertificateUtilities.DecodePublicPem(data);
-
-                    // Accept exactly one armored CRL or an unmodified DER payload.
-                    var text = Encoding.ASCII.GetString(data).Trim();
-                    if (!text.StartsWith("-----BEGIN", StringComparison.Ordinal)) return data;
-                    var match = Regex.Match(text,
-                        @"\A-----BEGIN (X509 CRL|CRL)-----\s*([A-Za-z0-9+/=\s]+?)\s*-----END \1-----\z");
-                    if (!match.Success) throw new ArgumentException("Select a single CRL in DER or PEM format.");
-                    return Convert.FromBase64String(match.Groups[2].Value);
+                    return store.IsCrl ? CertificateUtilities.DecodeObject(data, "X509 CRL", "CRL") :
+                        CertificateUtilities.DecodePublicPem(data);
                 });
 
                 // Validate the artifact for its destination and populate the preview.

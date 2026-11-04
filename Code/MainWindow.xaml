@@ -49,7 +49,7 @@ Licensed under GPLv3. See LICENSE.md.
                   Visibility="{DynamicResource ThemeVisibility}"
                   HorizontalAlignment="Right" Margin="0" local:Glyphs.Icon="{x:Static local:Glyphs.Theme}" />
         </StackPanel>
-        <StackPanel x:Name="ConnectionPanel" HorizontalAlignment="Left">
+        <StackPanel x:Name="ConnectionPanel" HorizontalAlignment="Stretch" MaxWidth="600">
           <Label x:Name="ConfigurationLabel" Content="Certificate Authority" Style="{StaticResource FieldLabelStyle}"
                  Target="{Binding ElementName=ConfigurationBox}"
                  local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}"
@@ -59,7 +59,7 @@ Licensed under GPLv3. See LICENSE.md.
                     local:Glyphs.Icon="{x:Static local:Glyphs.Connect}" />
             <Button x:Name="DiscoverButton" DockPanel.Dock="Right" Content="_Find CAs" Click="DiscoverClick" Margin="5,0,0,0"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Search}" />
-            <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False" Width="360"
+            <ComboBox x:Name="ConfigurationBox" IsEditable="True" IsTextSearchEnabled="False" MinWidth="120"
                       SelectionChanged="ConfigurationSelected"
                       AutomationProperties.LabeledBy="{Binding ElementName=ConfigurationLabel}"
                       ToolTip="Select All Certificate Authorities to search every listed authority, select one CA, or enter SERVER\CA Name.">
