@@ -107,13 +107,13 @@ namespace Certitude
             TimeDisplay.Label(caption, TextBlock.TextProperty, "Time (UTC)");
             panel.Children.Add(caption);
 
-            // Provide selectable and editable 24-hour time components with explicit accessible labels.
+            // Provide bounded 24-hour time components with explicit accessible labels.
             var time = new StackPanel { Orientation = Orientation.Horizontal };
             var labels = new[] { "Hour", "Minute", "Second" };
             for (var i = 0; i < clock.Length; i++)
             {
                 var field = new StackPanel { Margin = new Thickness(0, 0, i == 2 ? 0 : 8, 0) };
-                var box = new ComboBox { Width = 64, IsEditable = true, IsTextSearchEnabled = false,
+                var box = new ComboBox { Width = 64,
                     MaxDropDownHeight = 220, ItemsSource = Enumerable.Range(0, i == 0 ? 24 : 60)
                         .Select(value => value.ToString("D2", CultureInfo.InvariantCulture)).ToArray() };
                 var label = new Label { Content = labels[i], Target = box, Padding = new Thickness(0),

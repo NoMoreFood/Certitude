@@ -8,13 +8,14 @@ $ErrorActionPreference = 'Stop'
 $repository = [IO.Path]::GetFullPath("$PSScriptRoot\..")
 $temporary = Join-Path $repository ('Build\Temp\PackageSafety-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $temporary -Force
+$links = [Collections.Generic.List[string]]::new()
 
 try
 {
-    # Every invocation must reject overlapping paths before deleting content or reaching build/signing tools.
+    # Every invocation must reject unsafe paths before deleting content or reaching build/signing tools.
     foreach ($protected in @('BinaryDirectory', 'OutputDirectory'))
     {
-        foreach ($relationship in @('equal', 'parent', 'child'))
+        foreach ($relationship in @('equal', 'parent', 'child', 'junction', 'junction-parent'))
         {
             $stage = Join-Path $temporary "$protected-$relationship"
             $target = switch ($relationship)
@@ -22,8 +23,23 @@ try
                 'equal' { $stage }
                 'parent' { $temporary }
                 'child' { Join-Path $stage 'protected' }
+                default { Join-Path $temporary "$protected-$relationship-target" }
             }
-            $null = New-Item -ItemType Directory -Path $stage -Force
+            $expected = 'must not overlap'
+            if ($relationship.StartsWith('junction'))
+            {
+                # Exercise both a linked staging folder and an ordinary child reached through a linked parent.
+                $null = New-Item -ItemType Directory -Path $target
+                $null = New-Item -ItemType Junction -Path $stage -Target $target
+                $links.Add($stage)
+                $expected = 'must not traverse'
+                if ($relationship -eq 'junction-parent')
+                {
+                    $stage = Join-Path $stage 'Stage'
+                    $target = Join-Path $target 'Stage'
+                }
+            }
+            if (!(Test-Path -LiteralPath $stage)) { $null = New-Item -ItemType Directory -Path $stage }
             $sentinel = Join-Path $stage 'preserve.txt'
             [IO.File]::WriteAllText($sentinel, 'Existing content')
             $binary = Join-Path $temporary 'binaries'
@@ -42,13 +58,13 @@ try
                 $process.Kill()
                 throw 'Invalid packaging paths did not fail promptly.'
             }
-            if ($process.ExitCode -eq 0 -or (Get-Content -LiteralPath $errors -Raw) -notmatch 'must not overlap')
-            { throw "Packaging did not reject $protected $relationship overlap." }
+            if ($process.ExitCode -eq 0 -or (Get-Content -LiteralPath $errors -Raw) -notmatch $expected)
+            { throw "Packaging did not reject $protected $relationship." }
             if (!(Test-Path -LiteralPath $sentinel) -or [IO.File]::ReadAllText($sentinel) -ne 'Existing content')
             { throw "Packaging deleted existing content before rejecting $protected $relationship overlap." }
         }
     }
-    Write-Host 'All six packaging overlap checks passed; no build or signing tools were invoked.'
+    Write-Host 'All ten packaging path checks passed; no build or signing tools were invoked.'
 }
 finally
 {
@@ -56,5 +72,11 @@ finally
     $boundary = [IO.Path]::GetFullPath((Join-Path $repository 'Build\Temp')) + '\'
     if (!$temporary.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase))
     { throw 'Unexpected package test cleanup location.' }
+    foreach ($link in $links)
+    {
+        if (!$link.StartsWith($temporary + '\', [StringComparison]::OrdinalIgnoreCase))
+        { throw 'Unexpected package test junction location.' }
+        if (Test-Path -LiteralPath $link) { [IO.Directory]::Delete($link) }
+    }
     Remove-Item -LiteralPath $temporary -Recurse -Force
 }

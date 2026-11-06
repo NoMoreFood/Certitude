@@ -119,6 +119,14 @@ namespace Certitude
             Reject<InvalidDataException>(() => ComparisonData.Read(fixtures["ca"].Concat(new byte[] { 0 }).ToArray(),
                 artifactPath, CancellationToken.None), "Comparison silently ignored trailing DER data.");
 
+            // Single-certificate validation must not silently inspect only the first object in a DER file.
+            foreach (var suffix in new[] { new byte[] { 0 }, fixtures["sample"] })
+            {
+                File.WriteAllBytes(artifactPath, fixtures["ca"].Concat(suffix).ToArray());
+                Reject<ArgumentException>(() => CertificateValidation.ReadCertificate(artifactPath),
+                    "Certificate validation silently ignored trailing DER data or another certificate.");
+            }
+
             // A sharing violation during publication must preserve the destination and remove temporary output.
             var path = Path.Combine(output, "export.csv");
             var original = Encoding.UTF8.GetBytes("Existing export");
@@ -293,8 +301,32 @@ namespace Certitude
             ((TextBlock)Field(manager, "status")).Text = "Ready.";
             ((TabControl)Field(manager, "tabs")).SelectedIndex = 0;
             var picker = new FilePicker(true) { FileName = "certificate.cer" };
+            typeof(FilePicker).GetField("patterns", Private).SetValue(picker, new[] { "*.cer" });
+            var formats = (ComboBox)Field(picker, "formats");
+            formats.ItemsSource = new[] { "Certificate" };
+            formats.SelectedIndex = 0;
             typeof(FilePicker).GetField("initialized", Private).SetValue(picker, true);
             ((TextBox)Field(picker, "folder")).Text = output;
+
+            // File checks must lock the selection and restore interaction after either acceptance or failure.
+            var disabled = false;
+            picker.IsEnabledChanged += (sender, args) => { if (!(bool)args.NewValue) disabled = true; };
+            var selectedName = "selection-" + Guid.NewGuid().ToString("N") + ".cer";
+            ((TextBox)Field(picker, "names")).Text = selectedName;
+            window.ShowPage(picker);
+            Complete((Task)typeof(FilePicker).GetMethod("Accept", Private).Invoke(picker, null));
+            Assert(disabled && picker.IsEnabled && picker.FileName == Path.Combine(output, selectedName) &&
+                window.ActivePage != picker,
+                "File selection remained editable during acceptance or failed to complete.");
+            window.ShowPage(picker);
+            ((TextBox)Field(picker, "names")).Text = Path.Combine(selectedName, "missing.cer");
+            Complete((Task)typeof(FilePicker).GetMethod("Accept", Private).Invoke(picker, null));
+            Assert(picker.IsEnabled && window.ActivePage == picker && picker.FileNames.Length == 1 &&
+                picker.FileName == Path.Combine(output, selectedName) &&
+                ((TextBlock)Field(picker, "status")).Text.Contains("destination folder does not exist"),
+                "A failed file check changed the accepted selection or left the picker disabled.");
+            window.ClosePage(picker, null);
+            ((TextBlock)Field(picker, "status")).Text = "";
             ((TextBox)Field(picker, "names")).Text = "certificate.cer";
             var published = new PublishedPage();
             typeof(PublishedPage).GetField("initialized", Private).SetValue(published, true);
@@ -344,6 +376,20 @@ namespace Certitude
                 }
             }
             Console.WriteLine("Workspace previews rendered in both themes at minimum window dimensions.");
+
+            // Enlarged text must fit the shared table rows without losing glyphs above or below the baseline.
+            var table = new DataGrid { FontSize = 24, ItemsSource = new[] { new { Value = "Signing Key" } } };
+            var column = new DataGridTextColumn
+                { Header = "Certificate", Binding = new System.Windows.Data.Binding("Value") };
+            table.Columns.Add(column);
+            var tablePage = new WorkspacePage { Title = "Table Scaling", Content = table };
+            window.ShowPage(tablePage);
+            Render(window, Path.Combine(output, "table-text-200.png"), 1);
+            var row = (DataGridRow)table.ItemContainerGenerator.ContainerFromIndex(0);
+            var cell = column.GetCellContent(row);
+            cell.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            Assert(row.ActualHeight >= cell.DesiredSize.Height, "Enlarged table text is vertically clipped.");
+            window.ClosePage(tablePage, null);
 
             // Exercise the browser's real loading path with local fixtures and render a documentation preview.
             typeof(MainWindow).GetMethod("ReturnToBrowser", Private).Invoke(window, null);

@@ -278,8 +278,10 @@ namespace Certitude
 
         private async Task Accept()
         {
+            // Keep the selection fixed while filesystem checks and replacement confirmation are pending.
             if (accepting) return;
             accepting = true;
+            IsEnabled = false;
             using var cursor = BusyCursor.Enter();
             var request = generation;
             try
@@ -309,12 +311,13 @@ namespace Certitude
 
                 // Confirm replacement before returning the chosen paths to the calling workflow.
                 if (exists && !await Dialogs.Confirm(this, "Replace File", paths[0])) return;
+                if (request != generation) return;
                 FileNames = paths;
                 FileName = paths[0];
                 DialogResult = true;
             }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
-            finally { accepting = false; }
+            finally { accepting = false; IsEnabled = true; }
         }
 
         private sealed class FileChoice

@@ -58,7 +58,10 @@ namespace Certitude
             var bytes = CertificateUtilities.ReadEncoded(path);
             if (X509Certificate2.GetCertContentType(bytes) != X509ContentType.Cert)
                 throw new ArgumentException("Select a single public certificate in DER or PEM format.");
-            using (var certificate = new X509Certificate2(bytes)) return certificate.RawData;
+            using var certificate = new X509Certificate2(bytes);
+            if (!certificate.RawData.SequenceEqual(bytes))
+                throw new ArgumentException("Select a single encoded certificate without trailing data.");
+            return certificate.RawData;
         }
 
         public static ValidationResult Validate(byte[] encoded, string[] issuers, string[] crls, bool offline,

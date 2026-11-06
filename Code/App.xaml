@@ -526,8 +526,7 @@ Licensed under GPLv3. See LICENSE.md.
       <Setter Property="ScrollViewer.CanContentScroll" Value="True" />
       <Setter Property="GridLinesVisibility" Value="Horizontal" />
       <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource GridLine}" />
-      <Setter Property="RowHeight" Value="24" />
-      <Setter Property="ColumnHeaderHeight" Value="27" />
+      <Setter Property="MinRowHeight" Value="24" />
       <Setter Property="HeadersVisibility" Value="Column" />
       <Setter Property="AlternatingRowBackground" Value="{DynamicResource AlternateRow}" />
       <Setter Property="RowBackground" Value="{DynamicResource Surface}" />
@@ -554,6 +553,7 @@ Licensed under GPLv3. See LICENSE.md.
       </Style.Triggers>
     </Style>
     <Style TargetType="DataGridColumnHeader">
+      <Setter Property="MinHeight" Value="27" />
       <Setter Property="Padding" Value="6,0" />
       <Setter Property="FontWeight" Value="SemiBold" />
       <Setter Property="Background" Value="{DynamicResource SurfaceAlt}" />

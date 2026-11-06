@@ -50,6 +50,17 @@ try
         }
     }
 
+    # Do not let a junction or symbolic link redirect staging cleanup outside the validated Build path.
+    for ($directory = $StageDirectory; $directory.Length -gt $PSScriptRoot.Length;
+        $directory = [IO.Path]::GetDirectoryName($directory))
+    {
+        if ((Test-Path -LiteralPath $directory) -and
+            ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint))
+        {
+            throw 'StageDirectory must not traverse a junction or symbolic link.'
+        }
+    }
+
     # Derive the portable package name from the declared release version.
     $assemblyInfo = Get-Content -LiteralPath "$projectDirectory\App.xaml.cs" -Raw -Encoding UTF8
     $versionMatch = [regex]::Match($assemblyInfo, 'AssemblyFileVersion\("(\d+\.\d+\.\d+\.\d+)"\)')
