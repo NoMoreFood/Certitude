@@ -174,8 +174,7 @@ namespace Certitude
                 if (operation == MaintenanceOperation.BackupCa && string.IsNullOrWhiteSpace(secret))
                     throw new ArgumentException("Enter a password to protect the CA private-key backup.");
                 var plan = await Task.Run(() => CaMaintenance.Prepare(operation, config, directory));
-                if (operation != MaintenanceOperation.Health &&
-                    !await Dialogs.Confirm(this, "Review CA Maintenance", plan.Review))
+                if (!await Dialogs.Confirm(this, "Review CA Maintenance", plan.Review))
                 { status.Text = "Cancelled. No Changes Made."; return; }
 
                 // Run maintenance in the background while periodically displaying its output.

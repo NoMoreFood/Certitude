@@ -318,7 +318,7 @@ namespace Certitude
                     var keys = new HashSet<int>();
                     for (var index = 0; index < count; index++)
                     {
-                        var key = (Convert.ToInt32(admin.GetCAProperty(config, 39, index, 1, 0)) >> 16) & 0xffff;
+                        var key = CaAdministration.CrlIndex(config, admin, index);
                         if (!keys.Add(key)) continue;
                         foreach (var property in new[] { 17, 18 })
                         {

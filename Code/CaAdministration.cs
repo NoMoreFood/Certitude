@@ -135,7 +135,7 @@ namespace Certitude
                 CultureInfo.InvariantCulture)));
         }
 
-        private static int CrlIndex(string config, ICertAdmin admin, int certificateIndex) =>
+        internal static int CrlIndex(string config, ICertAdmin admin, int certificateIndex) =>
             (Convert.ToInt32(admin.GetCAProperty(config, 39, certificateIndex, 1, 0)) >> 16) & 0xffff;
 
         public static string Apply(string config, IReadOnlyList<CertificateRow> rows, string action, int reason,

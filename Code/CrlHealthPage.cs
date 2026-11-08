@@ -69,8 +69,7 @@ namespace Certitude
                                         .AppendLine("Thumbprint: " + certificate.Thumbprint)
                                         .Append("Valid from: ").AppendTime(start).AppendLine()
                                         .Append("Expires: ").AppendTime(end), end);
-                                keys.Add((Convert.ToInt32(admin.GetCAProperty(configuration, 39, index, 1, 0)) >> 16)
-                                    & 0xffff);
+                                keys.Add(CaAdministration.CrlIndex(configuration, admin, index));
                             }
                             catch (Exception error) { Failed("CA certificate " + index, error); }
                         }

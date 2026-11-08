@@ -62,13 +62,7 @@ namespace Certitude
         public static List<string> Discover()
         {
             // Skip directory discovery when this computer is not joined to a domain.
-            var error = NetGetJoinInformation(null, out var name, out var status);
-            try
-            {
-                if (error != 0) throw new System.ComponentModel.Win32Exception(error);
-                if (status != 3) return new List<string>();
-            }
-            finally { if (name != IntPtr.Zero) NetApiBufferFree(name); }
+            if (JoinedDomain(null).Length == 0) return new List<string>();
 
             // Find published enterprise CAs in the forest configuration partition.
             using (var root = OidDirectory.Bind("LDAP://RootDSE"))
