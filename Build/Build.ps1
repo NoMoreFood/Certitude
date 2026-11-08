@@ -100,7 +100,7 @@ try
     $hostArchitecture = $env:PROCESSOR_ARCHITECTURE
     if ($env:PROCESSOR_ARCHITEW6432) { $hostArchitecture = $env:PROCESSOR_ARCHITEW6432 }
     $toolArchitecture = switch ($hostArchitecture) { 'ARM64' { 'arm64' } 'AMD64' { 'x64' } default { 'x86' } }
-    $signTool = Get-ChildItem -LiteralPath (Join-Path $sdkRoot 'bin') -Directory |
+    $signTool = Get-ChildItem -LiteralPath (Join-Path $sdkRoot 'bin') -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
         Sort-Object { [version] $_.Name } -Descending |
         ForEach-Object { Join-Path $_.FullName "$toolArchitecture\signtool.exe" } |
