@@ -145,7 +145,7 @@ namespace Certitude
             using var cursor = BusyCursor.Enter();
             busy = true;
             editor.IsEnabled = false;
-            var secret = password?.Password;
+            var secret = operation == MaintenanceOperation.BackupCa ? password.Password : null;
             try
             {
                 if (operation == MaintenanceOperation.Health)
