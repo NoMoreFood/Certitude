@@ -249,9 +249,8 @@ namespace Certitude
         internal static PublishedArtifact[] Describe(PublishedStore store, PublishedObject target, byte[] value,
             OidNames names = null)
         {
-            // Ignore the required-attribute placeholder and fingerprint real publication values.
-            if (store.RequiredValue && value.Length == 1 && value[0] == 0)
-                return Array.Empty<PublishedArtifact>();
+            // Ignore empty-value placeholders, including CRL attributes on CA objects, and fingerprint real values.
+            if (Placeholder(value)) return Array.Empty<PublishedArtifact>();
             var fingerprint = CertificateUtilities.Sha256(value);
             PublishedArtifact Row(byte[] encoded, int direction)
             {
@@ -380,10 +379,8 @@ namespace Certitude
 
             // Retain the reviewed base CRL because its directory attribute accepts only one value.
             if (store.Id == "BaseCRL" && entry != null)
-            {
-                var previous = Values(connection, entry, store.Attribute).SingleOrDefault();
-                if (previous != null) plan.Previous = Describe(store, plan.Object, previous, Names).Single();
-            }
+                plan.Previous = Values(connection, entry, store.Attribute)
+                    .SelectMany(value => Describe(store, plan.Object, value, Names)).SingleOrDefault();
             return plan;
         }
 
@@ -421,27 +418,18 @@ namespace Certitude
                 if (duplicate) throw new InvalidOperationException("This value is already published on this object.");
 
                 // Replace a single-valued base CRL only while the reviewed value is still current.
-                if (plan.Store.Id == "BaseCRL")
-                {
-                    if (plan.Previous == null ? values.Length != 0 :
-                        values.Length != 1 || !values[0].SequenceEqual(plan.Previous.Value))
-                        throw new InvalidOperationException("The base CRL changed. Refresh and review again.");
-                    var replacement = new ModifyRequest(plan.Object.DistinguishedName);
-                    if (plan.Previous != null)
-                        replacement.Modifications.Add(Change(
-                            plan.Store.Attribute, DirectoryAttributeOperation.Delete, plan.Previous.Value));
-                    replacement.Modifications.Add(Change(
-                        plan.Store.Attribute, DirectoryAttributeOperation.Add, value));
-                    connection.SendRequest(replacement);
-                    return;
-                }
+                var replace = plan.Store.Id == "BaseCRL";
+                var published = values.Where(bytes => !Placeholder(bytes)).ToArray();
+                if (replace && (plan.Previous == null ? published.Length != 0 :
+                    published.Length != 1 || !published[0].SequenceEqual(plan.Previous.Value)))
+                    throw new InvalidOperationException("The base CRL changed. Refresh and review again.");
 
-                // Add the real artifact and remove an obsolete empty-value placeholder together.
-                var update = new ModifyRequest(plan.Object.DistinguishedName,
-                    DirectoryAttributeOperation.Add, plan.Store.Attribute, value);
-                if (values.Any(bytes => bytes.Length == 1 && bytes[0] == 0))
-                    update.Modifications.Add(Change(
-                        plan.Store.Attribute, DirectoryAttributeOperation.Delete, new byte[1]));
+                // Remove the reviewed base CRL and any empty-value placeholder in the change that adds the artifact.
+                var attribute = plan.Store.Attribute;
+                var update = new ModifyRequest(plan.Object.DistinguishedName);
+                foreach (var obsolete in values.Where(bytes => replace || Placeholder(bytes)))
+                    update.Modifications.Add(Change(attribute, DirectoryAttributeOperation.Delete, obsolete));
+                update.Modifications.Add(Change(attribute, DirectoryAttributeOperation.Add, value));
                 connection.SendRequest(update);
                 return;
             }
@@ -506,6 +494,9 @@ namespace Certitude
             }
             connection.SendRequest(request);
         }
+
+        // Windows publication objects use a zero byte for required attributes without a published value.
+        private static bool Placeholder(byte[] value) => value.Length == 1 && value[0] == 0;
 
         private static DirectoryAttributeModification Change(
             string name, DirectoryAttributeOperation operation, byte[] value)
