@@ -871,16 +871,17 @@ namespace Certitude
                         }
                         else
                         {
+                            // Drop unmatched IDs while streaming so ordering buffers only this batch's matches.
                             var minimum = batch.Keys.Min();
                             var maximum = batch.Keys.Max();
                             var rows = ReadRowsCore(metadata, null, token, false, null, null,
-                                resultColumns, resolveTemplates, minimum, maximumId: maximum);
+                                resultColumns, resolveTemplates, minimum, maximumId: maximum)
+                                .Where(row => batch.ContainsKey(row.RequestId));
                             var sorted = ascending ? rows.OrderBy(row => row.RequestId) :
                                 rows.OrderByDescending(row => row.RequestId);
                             foreach (var row in sorted)
                             {
-                                if (!batch.TryGetValue(row.RequestId, out var dns)) continue;
-                                row.DnsNames = dns;
+                                row.DnsNames = batch[row.RequestId];
                                 if (query.Matches(row)) yield return row;
                             }
                         }
