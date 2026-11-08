@@ -238,7 +238,8 @@ namespace Certitude
             using (var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request"))
             {
                 // Submit the normalized request and retain its identifier and native status.
-                var data = Convert.ToBase64String(CertificateUtilities.ReadEncoded(path));
+                var data = Convert.ToBase64String(CertificateUtilities.DecodeObject(
+                    CertificateUtilities.ReadBytes(path), "CERTIFICATE REQUEST", "NEW CERTIFICATE REQUEST"));
                 var result = request.Value.Submit(0x101, data, attributes, config);
                 return $"Request {request.Value.GetRequestId()}: {RequestDisposition(result)}\r\n" +
                     request.Value.GetDispositionMessage() + $"\r\nStatus: 0x{request.Value.GetLastStatus():X8}";
