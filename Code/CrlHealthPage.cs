@@ -36,8 +36,7 @@ namespace Certitude
             void Add(string item, string status, string source, TimeReport details, DateTime? expires = null) =>
                 report(new CrlHealthEntry { Configuration = configuration, Item = item, Status = status,
                     Source = source, Details = details, Expires = expires });
-            void Failed(string item, Exception error) =>
-                Add(item, "Unavailable", configuration, new TimeReport(CaAdministration.Error(error)));
+            void Failed(string item, Exception error) => report(Unavailable(configuration, item, error));
             try
             {
                 // Isolate unavailable CA properties so the remaining health checks can still complete.
@@ -46,33 +45,7 @@ namespace Certitude
                 {
                     CaAdministration.Use(configuration, admin =>
                     {
-                        var count = Convert.ToInt32(admin.GetCAProperty(configuration, 11, 0, 1, 0));
-                        if (count < 1 || count > 1024)
-                            throw new InvalidOperationException(
-                                "The CA returned an invalid signing certificate count.");
-                        var keys = new HashSet<int>();
-                        for (var index = 0; index < count; index++)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            try
-                            {
-                                var certificate = new X509Certificate2(Convert.FromBase64String(Convert.ToString(
-                                    admin.GetCAProperty(configuration, 12, index, 3, 1))));
-                                signers.Add(certificate);
-                                var start = certificate.NotBefore.ToUniversalTime();
-                                var end = certificate.NotAfter.ToUniversalTime();
-                                var now = DateTime.UtcNow;
-                                var status = end <= now ? "Expired" : start > now ? "Not yet valid" :
-                                    end <= now.AddDays(30) ? "Expires within 30 days" : "Current";
-                                Add("CA certificate " + index, status, certificate.Subject,
-                                    new TimeReport("CA signing certificate: " + certificate.Subject + "\r\n")
-                                        .AppendLine("Thumbprint: " + certificate.Thumbprint)
-                                        .Append("Valid from: ").AppendTime(start).AppendLine()
-                                        .Append("Expires: ").AppendTime(end), end);
-                                keys.Add(CaAdministration.CrlIndex(configuration, admin, index));
-                            }
-                            catch (Exception error) { Failed("CA certificate " + index, error); }
-                        }
+                        var keys = ReadSignersAndKeys(configuration, admin, signers, token, report);
 
                         // A disabled delta schedule is different from a failed or unreadable delta CRL.
                         bool? deltas = null;
@@ -152,6 +125,47 @@ namespace Certitude
             }
             finally { foreach (var signer in signers) signer.Dispose(); }
         }
+
+        internal static HashSet<int> ReadSignersAndKeys(string configuration, ICertAdmin admin,
+            List<X509Certificate2> signers, CancellationToken token, Action<CrlHealthEntry> report)
+        {
+            // Keep readable signers for signature checks even when their CRL key indexes are unavailable.
+            token.ThrowIfCancellationRequested();
+            var count = CaAdministration.SigningCertificateCount(configuration, admin);
+            if (count < 1 || count > 1024)
+                throw new InvalidOperationException("The CA returned an invalid signing certificate count.");
+            for (var index = 0; index < count; index++)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    var certificate = new X509Certificate2(Convert.FromBase64String(Convert.ToString(
+                        admin.GetCAProperty(configuration, 12, index, 3, 1))));
+                    signers.Add(certificate);
+                    var start = certificate.NotBefore.ToUniversalTime();
+                    var end = certificate.NotAfter.ToUniversalTime();
+                    var now = DateTime.UtcNow;
+                    var status = end <= now ? "Expired" : start > now ? "Not yet valid" :
+                        end <= now.AddDays(30) ? "Expires within 30 days" : "Current";
+                    report(new CrlHealthEntry { Configuration = configuration, Item = "CA certificate " + index,
+                        Status = status, Source = certificate.Subject, Expires = end,
+                        Details = new TimeReport("CA signing certificate: " + certificate.Subject + "\r\n")
+                            .AppendLine("Thumbprint: " + certificate.Thumbprint)
+                            .Append("Valid from: ").AppendTime(start).AppendLine()
+                            .Append("Expires: ").AppendTime(end) });
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                { report(Unavailable(configuration, "CA certificate " + index, error)); }
+            }
+
+            // Publication properties remain readable for a key even when its certificate could not be loaded.
+            return CaAdministration.ReadCrlKeys(configuration, admin, count, token,
+                (item, error) => report(Unavailable(configuration, item, error)));
+        }
+
+        private static CrlHealthEntry Unavailable(string configuration, string item, Exception error) =>
+            new CrlHealthEntry { Configuration = configuration, Item = item, Status = "Unavailable",
+                Source = configuration, Details = new TimeReport(CaAdministration.Error(error)) };
 
         internal static string CrlStatus(CrlResult crl, bool delta)
         {

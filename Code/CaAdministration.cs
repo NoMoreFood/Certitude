@@ -85,31 +85,52 @@ namespace Certitude
             });
         }
 
-        public static string CrlPublicationStatus(string config, ICertAdmin admin)
+        internal static int SigningCertificateCount(string config, ICertAdmin admin) =>
+            Convert.ToInt32(admin.GetCAProperty(config, 11, 0, 1, 0));
+
+        internal static HashSet<int> ReadCrlKeys(string config, ICertAdmin admin, int count, CancellationToken token,
+            Action<string, Exception> failed)
         {
-            // Resolve renewed CA certificates to unique CRL signing-key indexes.
-            var text = new StringBuilder("CRL publication status — " + config + "\r\n");
-            var count = Convert.ToInt32(admin.GetCAProperty(config, 11, 0, 1, 0));
-            var seen = new HashSet<int>();
+            // A renewal can reuse a key, and an unavailable version must leave later renewals readable.
+            var keys = new HashSet<int>();
             for (var index = 0; index < count; index++)
             {
-                var crlIndex = CrlIndex(config, admin, index);
-                if (!seen.Add(crlIndex)) continue;
+                token.ThrowIfCancellationRequested();
+                try { keys.Add(CrlIndex(config, admin, index)); }
+                catch (Exception error) when (error is not OperationCanceledException)
+                { failed("CRL key for CA certificate " + index, error); }
+            }
+            return keys;
+        }
 
+        public static string CrlPublicationStatus(string config, ICertAdmin admin) =>
+            ReadCrlPublication(config, admin, SigningCertificateCount(config, admin), CancellationToken.None).Status;
+
+        internal static (string Status, HashSet<int> Keys) ReadCrlPublication(string config, ICertAdmin admin,
+            int count, CancellationToken token)
+        {
+            // Keep each failed key lookup in the report alongside the available publication results.
+            var text = new StringBuilder("CRL publication status — " + config + "\r\n");
+            var keys = ReadCrlKeys(config, admin, count, token,
+                (label, error) => text.AppendLine(label + ": " + Error(error)));
+            foreach (var crlIndex in keys)
+            {
                 // Read base and delta results independently so one failed property does not hide the others.
                 foreach (var property in new[] { 30, 31 })
                 {
+                    token.ThrowIfCancellationRequested();
                     var label = "CRL key index " + crlIndex + (property == 30 ? " · Base: " : " · Delta: ");
                     try
                     {
                         var flags = Convert.ToInt32(admin.GetCAProperty(config, property, crlIndex, 1, 0));
                         text.AppendLine(label + FormatCrlPublicationStatus(flags));
                     }
-                    catch (Exception error) { text.AppendLine(label + Error(error)); }
+                    catch (Exception error) when (error is not OperationCanceledException)
+                    { text.AppendLine(label + Error(error)); }
                 }
             }
             text.AppendLine("These are the CA's reported publication results. Validate the certificate's CDP URLs to check client reachability.");
-            return text.ToString();
+            return (text.ToString(), keys);
         }
 
         internal static string FormatCrlPublicationStatus(int flags)
@@ -135,7 +156,7 @@ namespace Certitude
                 CultureInfo.InvariantCulture)));
         }
 
-        internal static int CrlIndex(string config, ICertAdmin admin, int certificateIndex) =>
+        private static int CrlIndex(string config, ICertAdmin admin, int certificateIndex) =>
             (Convert.ToInt32(admin.GetCAProperty(config, 39, certificateIndex, 1, 0)) >> 16) & 0xffff;
 
         public static string Apply(string config, IReadOnlyList<CertificateRow> rows, string action, int reason,

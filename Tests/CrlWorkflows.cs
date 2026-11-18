@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -32,6 +33,12 @@ namespace Certitude
         {
             try
             {
+                if (args.Length == 2 && args[0] == "--probe-offline-maintenance")
+                {
+                    try { using var reservation = CaMaintenance.BeginOfflineMaintenance(args[1]); return 0; }
+                    catch (InvalidOperationException) { return 2; }
+                }
+
                 // Render previews even when the unattended runner has no connected display.
                 AppContext.SetSwitch(
                     "Switch.System.Windows.Media.ShouldRenderEvenWhenNoDisplayDevicesAreAvailable", true);
@@ -40,6 +47,8 @@ namespace Certitude
                 document.Load(Path.Combine(args[0], "Tests", "CrlFixtures.xml"));
                 foreach (XmlElement element in document.DocumentElement.ChildNodes)
                     fixtures.Add(element.Name, Convert.FromBase64String(element.InnerText));
+                CheckOfflineMaintenance();
+                CheckRenewedCrlKeys();
                 CheckRevocations();
                 var entries = CheckHealth();
                 CheckReleasePaths(args[0]);
@@ -53,6 +62,82 @@ namespace Certitude
         private static void Assert(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);
+        }
+
+        private static void CheckOfflineMaintenance()
+        {
+            // A second process must fail promptly while the reservation is held and succeed after release.
+            var mutexName = @"Global\Certitude.Test." + Guid.NewGuid().ToString("N");
+            void Probe(bool busy)
+            {
+                using var child = Process.Start(new ProcessStartInfo(typeof(WorkflowChecks).Assembly.Location,
+                    "--probe-offline-maintenance " + mutexName) { UseShellExecute = false, CreateNoWindow = true });
+                if (!child.WaitForExit(10000))
+                {
+                    child.Kill();
+                    throw new TimeoutException("The competing maintenance process did not finish.");
+                }
+                Assert(child.ExitCode == (busy ? 2 : 0),
+                    "Unexpected maintenance reservation result: " + child.ExitCode);
+            }
+
+            using (CaMaintenance.BeginOfflineMaintenance(mutexName)) Probe(true);
+            Probe(false);
+        }
+
+        private static void CheckRenewedCrlKeys()
+        {
+            // Certificate 1 has no readable version, certificate 2 is unreadable, and certificate 4 reuses key 3.
+            var reads = new List<(int Property, int Index)>();
+            var admin = new TestAdmin { ReadProperty = (property, index) =>
+            {
+                reads.Add((property, index));
+                return property switch
+                {
+                    11 => 5,
+                    12 when index == 2 => throw new InvalidOperationException("Certificate unavailable"),
+                    12 => Convert.ToBase64String(fixtures["ca"]),
+                    39 when index == 1 => throw new InvalidOperationException("Version unavailable"),
+                    39 => ((index == 4 ? 3 : index) << 16) | index,
+                    30 => 5, 31 => 6,
+                    17 => Convert.ToBase64String(fixtures["base"]), 18 => Convert.ToBase64String(fixtures["delta"]),
+                    _ => 0
+                };
+            } };
+            var expected = new[] { 0, 2, 3 };
+            var status = CaAdministration.CrlPublicationStatus(targets[0], admin);
+            Assert(status.Contains("CRL key for CA certificate 1: Version unavailable") &&
+                expected.All(key => status.Contains("CRL key index " + key + " · Base:")),
+                "Publication status lost a key or the reason a renewal was skipped.");
+
+            // The Statistics refresh must reuse the same count and keys for status and both metadata properties.
+            reads.Clear();
+            var statistics = new CaServerStatistics();
+            statistics.ReadAuthorityProperties(targets[0], admin, CancellationToken.None);
+            var versions = reads.Where(read => read.Property == 39).Select(read => read.Index);
+            Assert(reads.Count(read => read.Property == 11) == 1 && versions.SequenceEqual(Enumerable.Range(0, 5)),
+                "Statistics must read the signing count once and each certificate version once.");
+            Assert(statistics.Authority.Single(row => row.Name == "CRL Publication").Value == status &&
+                statistics.Authority.Count(row => row.Report != null) == expected.Length * 2,
+                "Statistics lost publication status or CRL metadata after an unavailable renewal.");
+            foreach (var property in new[] { 17, 18, 30, 31 })
+                Assert(reads.Where(read => read.Property == property).Select(read => read.Index).OrderBy(key => key)
+                    .SequenceEqual(expected), "A CRL property was skipped or queried twice for a reused key.");
+
+            // Health must retain the unique key of an unreadable certificate and label key failures independently.
+            var signers = new List<X509Certificate2>();
+            var entries = new List<CrlHealthEntry>();
+            try
+            {
+                var keys = CrlHealth.ReadSignersAndKeys(targets[0], admin, signers,
+                    CancellationToken.None, entries.Add);
+                Assert(keys.SetEquals(expected) && signers.Count == 4 &&
+                    entries.Single(row => row.Item == "CA certificate 1").Expires.HasValue &&
+                    entries.Single(row => row.Item == "CA certificate 2").Status == "Unavailable" &&
+                    entries.Single(row => row.Item == "CRL key for CA certificate 1").Status == "Unavailable",
+                    "Health conflated a signing-certificate failure with a CRL key failure.");
+            }
+            finally { foreach (var signer in signers) signer.Dispose(); }
         }
 
         private static void CheckRevocations()
@@ -296,6 +381,7 @@ namespace Certitude
     internal sealed class TestAdmin : ICertAdmin
     {
         public Action AfterRevoke;
+        public Func<int, int, object> ReadProperty = (id, index) => throw new NotSupportedException();
         public int Reason;
         public void RevokeCertificate(string config, string serial, int reason, double date)
         {
@@ -315,11 +401,11 @@ namespace Certitude
         public int ImportCertificate(string config, string certificate, int flags) => throw new NotSupportedException();
         public void PublishCRLs(string config, double date, int flags) => throw new NotSupportedException();
         public object GetCAProperty(string config, int id, int index, int type, int flags) =>
-            throw new NotSupportedException();
+            ReadProperty(id, index);
         public void SetCAProperty(string config, int id, int index, int type, IntPtr value) =>
             throw new NotSupportedException();
-        public int GetCAPropertyFlags(string config, int id) => throw new NotSupportedException();
-        public string GetCAPropertyDisplayName(string config, int id) => throw new NotSupportedException();
+        public int GetCAPropertyFlags(string config, int id) => 1;
+        public string GetCAPropertyDisplayName(string config, int id) => "Property " + id;
         public string GetArchivedKey(string config, int id, int flags) => throw new NotSupportedException();
         public object GetConfigEntry(string config, string node, string name) => throw new NotSupportedException();
         public void SetConfigEntry(string config, string node, string name, IntPtr value) =>

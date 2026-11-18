@@ -297,38 +297,7 @@ namespace Certitude
             // Read supported CA properties without letting one unavailable value stop the report.
             Attempt(result.Authority, "CA Properties", token, () => CaAdministration.Use(config, admin =>
             {
-                foreach (var id in new[] { 6, 22, 10, 1, 2, 5, 11, 23, 24, 25, 29 })
-                {
-                    Attempt(result.Authority, "CA Property " + id, token, () =>
-                    {
-                        var type = admin.GetCAPropertyFlags(config, id) & 255;
-                        var value = admin.GetCAProperty(config, id, 0, type, 1);
-                        if (id == 10) value = CaTypeName(Convert.ToInt32(value));
-                        Add(result.Authority, Dialogs.Caption(admin.GetCAPropertyDisplayName(config, id)),
-                            value);
-                    });
-                }
-                // Collect publication status and the available base and delta CRL metadata.
-                Attempt(result.Authority, "CRL Publication", token, () =>
-                    Add(result.Authority, "CRL Publication", CaAdministration.CrlPublicationStatus(config, admin)));
-                Attempt(result.Authority, "CRL Metadata", token, () =>
-                {
-                    // Visit each distinct signing key once when reading its CRLs.
-                    var count = Convert.ToInt32(admin.GetCAProperty(config, 11, 0, 1, 0));
-                    var keys = new HashSet<int>();
-                    for (var index = 0; index < count; index++)
-                    {
-                        var key = CaAdministration.CrlIndex(config, admin, index);
-                        if (!keys.Add(key)) continue;
-                        foreach (var property in new[] { 17, 18 })
-                        {
-                            var label = "Key " + key + (property == 17 ? " Base CRL" : " Delta CRL");
-                            Attempt(result.Authority, label, token, () => Add(result.Authority, label,
-                                CertificateValidation.CrlMetadata(Convert.FromBase64String(Convert.ToString(
-                                    admin.GetCAProperty(config, property, key, 3, 1))))));
-                        }
-                    }
-                });
+                result.ReadAuthorityProperties(config, admin, token);
                 return true;
             }));
 
@@ -414,6 +383,39 @@ namespace Certitude
                 Add(result.Storage, "Storage Metrics", "Unavailable — Server WMI Could Not Be Read.");
             token.ThrowIfCancellationRequested();
             return result;
+        }
+
+        internal void ReadAuthorityProperties(string config, ICertAdmin admin, CancellationToken token)
+        {
+            // Share the signing-certificate count between the property table and its CRL details.
+            var count = new Lazy<int>(() => CaAdministration.SigningCertificateCount(config, admin));
+            foreach (var id in new[] { 6, 22, 10, 1, 2, 5, 11, 23, 24, 25, 29 })
+            {
+                Attempt(Authority, "CA Property " + id, token, () =>
+                {
+                    var value = id == 11 ? count.Value :
+                        admin.GetCAProperty(config, id, 0, admin.GetCAPropertyFlags(config, id) & 255, 1);
+                    if (id == 10) value = CaTypeName(Convert.ToInt32(value));
+                    Add(Authority, Dialogs.Caption(admin.GetCAPropertyDisplayName(config, id)), value);
+                });
+            }
+
+            // Read metadata for the same keys whose publication status was collected this refresh.
+            Attempt(Authority, "CRL Publication And Metadata", token, () =>
+            {
+                var (status, keys) = CaAdministration.ReadCrlPublication(config, admin, count.Value, token);
+                Add(Authority, "CRL Publication", status);
+                foreach (var key in keys)
+                {
+                    foreach (var property in new[] { 17, 18 })
+                    {
+                        var label = "Key " + key + (property == 17 ? " Base CRL" : " Delta CRL");
+                        Attempt(Authority, label, token, () => Add(Authority, label,
+                            CertificateValidation.CrlMetadata(Convert.FromBase64String(Convert.ToString(
+                                admin.GetCAProperty(config, property, key, 3, 1))))));
+                    }
+                }
+            });
         }
 
         private static void ReadStorage(CaServerStatistics result, ManagementScope scope, string host,

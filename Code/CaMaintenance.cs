@@ -13,6 +13,7 @@ using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using System.ServiceProcess;
+using System.Threading;
 
 namespace Certitude
 {
@@ -192,6 +193,8 @@ namespace Certitude
             }
             // Recheck the target, password, destination, and storage before creating maintenance output.
             ValidateLocalTarget(plan.Configuration);
+            var offline = plan.Operation is MaintenanceOperation.Compact or MaintenanceOperation.Integrity;
+            using var maintenance = offline ? BeginOfflineMaintenance() : null;
             if (plan.Operation == MaintenanceOperation.BackupCa && string.IsNullOrWhiteSpace(password))
                 throw new ArgumentException("Enter a password to protect the CA private-key backup.");
             if (Directory.Exists(plan.Destination) || File.Exists(plan.Destination))
@@ -218,7 +221,7 @@ namespace Certitude
                     var signing = CaAdministration.Use(plan.Configuration, admin =>
                     {
                         var certificates = new X509Certificate2Collection();
-                        var count = Convert.ToInt32(admin.GetCAProperty(plan.Configuration, 11, 0, 1, 0));
+                        var count = CaAdministration.SigningCertificateCount(plan.Configuration, admin);
                         for (var index = 0; index < count; index++)
                         {
                             using var certificate = new X509Certificate2(Convert.FromBase64String(Convert.ToString(
@@ -254,7 +257,7 @@ namespace Certitude
                 output("Backup Completed: " + plan.Destination);
             }
             // Run ESE work only while the service is stopped under restoration protection.
-            if (plan.Operation == MaintenanceOperation.Compact || plan.Operation == MaintenanceOperation.Integrity)
+            if (offline)
             {
                 var before = new FileInfo(plan.Database).Length;
                 WithOfflineService(plan.Configuration, output, () =>
@@ -277,6 +280,15 @@ namespace Certitude
                     CaServerStatistics.Size(after) + "\r\nSpace Reclaimed: " + CaServerStatistics.Size(Math.Max(0, before - after)));
             }
             output(Caption(plan.Operation) + " Completed In " + watch.Elapsed.TotalSeconds.ToString("N2") + "s.");
+        }
+
+        internal static Mutex BeginOfflineMaintenance(string mutexName = @"Global\Certitude.OfflineMaintenance")
+        {
+            // The first handle reserves the local CA across Windows sessions until service restoration finishes.
+            var reservation = new Mutex(false, mutexName, out var created);
+            if (created) return reservation;
+            reservation.Dispose();
+            throw new InvalidOperationException("Offline CA maintenance is already running on this machine.");
         }
 
         private static void WithOfflineService(string configuration, Action<string> output, Action operation)
