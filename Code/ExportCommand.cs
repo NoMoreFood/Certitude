@@ -72,11 +72,11 @@ namespace Certitude
         }
     }
 
-    internal sealed class ExportField
+    internal sealed class ExportField(string name, Type type, Func<CertificateRow, object> read)
     {
-        public string Name { get; }
-        public Type Type { get; }
-        public Func<CertificateRow, object> Read { get; }
+        public string Name { get; } = name;
+        public Type Type { get; } = type;
+        public Func<CertificateRow, object> Read { get; } = read;
 
         // Map exported values to the native columns needed to compute them.
         public string[] Columns => Name switch
@@ -88,40 +88,39 @@ namespace Certitude
             "Configuration" => Array.Empty<string>(), _ => new[] { Name }
         };
 
-        private ExportField(string name, Type type, Func<CertificateRow, object> read)
-        { Name = name; Type = type; Read = read; }
-
         public static readonly ExportField[] All =
         {
-            new ExportField("RequestID", typeof(int), row => row.RequestId),
-            new ExportField("CommonName", typeof(string), row => row.CommonName),
-            new ExportField("RequesterName", typeof(string), row => row.Requester),
-            new ExportField("CertificateTemplate", typeof(string), row => row.Template),
-            new ExportField("SerialNumber", typeof(string), row => row.SerialNumber),
-            new ExportField("NotBefore", typeof(DateTime), row => row.NotBefore),
-            new ExportField("NotAfter", typeof(DateTime), row => row.NotAfter),
-            new ExportField("Status", typeof(string), row => row.Status),
-            new ExportField("Disposition", typeof(int), row => row.Disposition),
-            new ExportField("RevocationReason", typeof(int), row => row.RevocationReason),
-            new ExportField("TemplateDisplayName", typeof(string), row => row.TemplateDisplayName),
-            new ExportField("TemplateName", typeof(string), row => row.TemplateName),
-            new ExportField("TemplateOid", typeof(string), row => row.TemplateOid),
-            new ExportField("Configuration", typeof(string), row => row.Configuration)
+            new("RequestID", typeof(int), row => row.RequestId),
+            new("CommonName", typeof(string), row => row.CommonName),
+            new("RequesterName", typeof(string), row => row.Requester),
+            new("CertificateTemplate", typeof(string), row => row.Template),
+            new("SerialNumber", typeof(string), row => row.SerialNumber),
+            new("NotBefore", typeof(DateTime), row => row.NotBefore),
+            new("NotAfter", typeof(DateTime), row => row.NotAfter),
+            new("Status", typeof(string), row => row.Status),
+            new("Disposition", typeof(int), row => row.Disposition),
+            new("RevocationReason", typeof(int), row => row.RevocationReason),
+            new("TemplateDisplayName", typeof(string), row => row.TemplateDisplayName),
+            new("TemplateName", typeof(string), row => row.TemplateName),
+            new("TemplateOid", typeof(string), row => row.TemplateOid),
+            new("Configuration", typeof(string), row => row.Configuration)
         };
         public static readonly string[] Defaults = All.Take(8).Select(field => field.Name).ToArray();
 
-        public static ExportField Find(string name)
+        private static readonly Dictionary<string, ExportField> byName =
+            All.ToDictionary(field => field.Name, StringComparer.OrdinalIgnoreCase);
+
+        static ExportField()
         {
-            // Resolve accepted aliases to one canonical export field definition.
-            var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                { "Requester", "RequesterName" }, { "Template", "CertificateTemplate" },
-                { "Request.Disposition", "Disposition" }, { "Request.RevokedReason", "RevocationReason" }
-            };
-            if (aliases.TryGetValue(name.Trim(), out var alias)) name = alias;
-            return All.FirstOrDefault(field => field.Name.Equals(name.Trim(), StringComparison.OrdinalIgnoreCase)) ??
-                throw new ArgumentException("Unknown field '" + name + "'. Use export --list-fields.");
+            // Resolve accepted aliases to the same fields as their canonical names.
+            byName["Requester"] = byName["RequesterName"];
+            byName["Template"] = byName["CertificateTemplate"];
+            byName["Request.Disposition"] = byName["Disposition"];
+            byName["Request.RevokedReason"] = byName["RevocationReason"];
         }
+
+        public static ExportField Find(string name) => byName.TryGetValue(name.Trim(), out var field) ? field :
+            throw new ArgumentException("Unknown field '" + name + "'. Use export --list-fields.");
 
         public static ExportField[] Select(string[] names)
         {
@@ -161,11 +160,11 @@ namespace Certitude
 
             // Unquote literal values and reject operators incompatible with the selected field type.
             var value = match.Groups["value"].Value;
-            if (value.Length >= 2 && (value[0] == '\'' || value[0] == '"') && value[0] == value[value.Length - 1])
+            if (value.Length >= 2 && value[0] is '\'' or '"' && value[0] == value[value.Length - 1])
                 value = value.Substring(1, value.Length - 2);
             var textOperator = condition.Operator is "contains" or "startswith" or "endswith";
             if (condition.Field.Type != typeof(string) && textOperator || condition.Field.Type == typeof(string) &&
-                !textOperator && condition.Operator != "=" && condition.Operator != "!=")
+                !textOperator && condition.Operator is not ("=" or "!="))
                 throw new ArgumentException("Operator '" + condition.Operator +
                     "' is not supported for " + condition.Field.Name + ".");
 
@@ -175,11 +174,12 @@ namespace Certitude
             else
             {
                 var number = condition.Field.Name == "Disposition" ? Disposition(value) : null;
-                if (!number.HasValue && !int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
-                    throw new ArgumentException("Enter an integer for " + condition.Field.Name +
-                        (condition.Field.Name == "Disposition" ?
-                            " or a disposition name such as Issued or Pending." : "."));
-                condition.Value = number ?? int.Parse(value, CultureInfo.InvariantCulture);
+                if (number.HasValue) condition.Value = number.Value;
+                else if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                    condition.Value = parsed;
+                else throw new ArgumentException("Enter an integer for " + condition.Field.Name +
+                    (condition.Field.Name == "Disposition" ?
+                        " or a disposition name such as Issued or Pending." : "."));
             }
             return condition;
         }
@@ -277,7 +277,7 @@ namespace Certitude
                 var option = args[i].ToLowerInvariant();
                 if (option != "--where" && !seen.Add(option))
                     throw new ArgumentException("Duplicate option: " + option);
-                if (option == "--help" || option == "-h") { command.Help = true; continue; }
+                if (option is "--help" or "-h") { command.Help = true; continue; }
                 if (option == "--list-fields") { command.ListFields = true; continue; }
                 if (option == "--force") { command.Force = true; continue; }
 
@@ -329,7 +329,7 @@ namespace Certitude
                 var date = (DateTime)condition.Value;
                 if (condition.Operator is "=" or ">" or ">=" &&
                     (!query.ExpiresFrom.HasValue || date > query.ExpiresFrom)) query.ExpiresFrom = date;
-                if (condition.Operator == "<=" || condition.Operator == "=")
+                if (condition.Operator is "<=" or "=")
                 {
                     if (date == DateTime.MaxValue) continue;
                     date = date.AddTicks(1);
@@ -370,8 +370,7 @@ namespace Certitude
 
                 // Report OID lookup limitations when the chosen fields or filters depend on resolved template names.
                 if (store.LoadedOids?.Warning.Length > 0 &&
-                    (ExportField.Select(command.Fields).Any(field =>
-                        field.Name.StartsWith("Template", StringComparison.Ordinal)) ||
+                    (command.Fields.Any(name => name.StartsWith("Template", StringComparison.Ordinal)) ||
                     command.Conditions.Any(condition =>
                         condition.Field.Name.StartsWith("Template", StringComparison.Ordinal))))
                     error.WriteLine(store.LoadedOids.Warning);

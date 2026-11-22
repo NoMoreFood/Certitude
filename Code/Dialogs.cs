@@ -15,6 +15,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Input;
 
 namespace Certitude
 {
@@ -78,8 +79,8 @@ namespace Certitude
             // Title-case ordinary words while preserving acronyms, date tokens, and mnemonic positions.
             var word = match.Value;
             var plain = word.Replace("_", "");
-            if (new[] { "Certitude", "SANs", "CRLs", "CAs", "IDs" }.Contains(plain) || plain.All(char.IsUpper) ||
-                new[] { "yyyy-MM-dd", "yyyy", "dd", "mm", "ss" }.Contains(plain)) return word;
+            if (plain is "Certitude" or "SANs" or "CRLs" or "CAs" or "IDs" or "yyyy" or "dd" or "mm" or "ss" ||
+                plain.All(char.IsUpper)) return word;
             var result = char.ToUpperInvariant(plain[0]) + plain.Substring(1).ToLowerInvariant();
             for (var i = 0; i < word.Length; i++) if (word[i] == '_') result = result.Insert(i, "_");
             return result;
@@ -125,6 +126,30 @@ namespace Certitude
             foreach (var footer in layout.Children.OfType<FrameworkElement>()
                 .Where(item => DockPanel.GetDock(item) == Dock.Bottom))
                 footer.SizeChanged += (sender, e) => Resize();
+        }
+
+        public static TextBox OutputBox(double height = double.NaN, Thickness margin = default, bool monospace = false)
+        {
+            // Wrap prose and let console-style reports scroll horizontally.
+            var box = new TextBox { IsReadOnly = true, AcceptsReturn = true, Height = height, Margin = margin,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            if (monospace)
+            {
+                box.FontFamily = new System.Windows.Media.FontFamily("Consolas");
+                box.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+            }
+            else box.TextWrapping = TextWrapping.Wrap;
+            return box;
+        }
+
+        public static void InlineField(Panel panel, string caption, FrameworkElement control, Thickness? margin = null)
+        {
+            var label = Glyphs.Label(caption, true);
+            label.Target = control;
+            if (margin.HasValue) label.Margin = margin.Value;
+            AutomationProperties.SetLabeledBy(control, label);
+            panel.Children.Add(label);
+            panel.Children.Add(control);
         }
 
         public static TextBox Field(Panel panel, string label, string value = "", bool multiline = false,
@@ -178,9 +203,7 @@ namespace Certitude
             layout.Children.Add(buttons);
             Button(buttons, "_Continue", () => page.DialogResult = true);
             Button(buttons, "_Cancel", page.Close);
-            var output = new TextBox { IsReadOnly = true, AcceptsReturn = true,
-                TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                VerticalContentAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 0, 0, 8) };
+            var output = OutputBox(margin: new Thickness(0, 0, 0, 8));
             TimeDisplay.Text(output, text);
             layout.Children.Add(output);
             page.Content = layout;
@@ -204,25 +227,14 @@ namespace Certitude
             // Create a workspace report with save and back controls.
             var page = new WorkspacePage { Owner = owner, Title = Caption(title) };
             var layout = new DockPanel { Margin = new Thickness(8) };
-            var output = new TextBox
-            {
-                IsReadOnly = true, AcceptsReturn = true, FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Margin = new Thickness(0, 0, 0, 6), VerticalContentAlignment = VerticalAlignment.Top
-            };
+            var output = OutputBox(margin: new Thickness(0, 0, 0, 6), monospace: true);
             TimeDisplay.Text(output, text);
             if (comparison != null) ComparisonMenu(output, () => comparison, () => true);
             var buttons = new WrapPanel();
             DockPanel.SetDock(buttons, Dock.Bottom);
             layout.Children.Add(buttons);
-            Button(buttons, "_Save", async () =>
-            {
-                // Save the report text and surface file errors through the main status area.
-                var save = new FilePicker(true) { FileName = "Certitude-log.txt", Filter = "Text|*.txt", Owner = page };
-                if (await save.ShowAsync() != true) return;
-                try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(output.Text)); }
-                catch (Exception error) { ((MainWindow)Application.Current.MainWindow).Notify(CaAdministration.Error(error)); }
-            });
+            Button(buttons, "_Save", async () => await SaveFile(page, "Certitude-log.txt", "Text|*.txt",
+                _ => Encoding.UTF8.GetBytes(output.Text)));
 
             // Show report text in a scrolling read-only pane.
             Button(buttons, "_Back", page.Close);
@@ -291,10 +303,7 @@ namespace Certitude
             if (target is TextBox text)
             {
                 menu.Items.Add(new Separator());
-                menu.Items.Add(new MenuItem { Header = "_Copy", Command = System.Windows.Input.ApplicationCommands.Copy,
-                    CommandTarget = text });
-                menu.Items.Add(new MenuItem { Header = "Select _All",
-                    Command = System.Windows.Input.ApplicationCommands.SelectAll, CommandTarget = text });
+                TextCommands(menu, text, accessKeys: true);
             }
             // Refresh menu applicability and suppress menus with no visible actions.
             target.ContextMenuOpening += (sender, e) => { if (!Update()) e.Handled = true; };
@@ -305,6 +314,17 @@ namespace Certitude
                 () => certificate() != null, ready);
         }
 
+        private static void TextCommands(ContextMenu menu, TextBox text, bool accessKeys = false)
+        {
+            // Direct editing commands to the text box even while its menu has focus.
+            void Add(RoutedUICommand command, string caption = null) => menu.Items.Add(
+                new MenuItem { Header = caption ?? command.Text, Command = command, CommandTarget = text });
+            if (!text.IsReadOnly) Add(ApplicationCommands.Cut);
+            Add(ApplicationCommands.Copy, accessKeys ? "_Copy" : null);
+            if (!text.IsReadOnly) Add(ApplicationCommands.Paste);
+            Add(ApplicationCommands.SelectAll, accessKeys ? "Select _All" : null);
+        }
+
         public static void ComparisonMenu(FrameworkElement target, Func<ComparisonSource> source,
             Func<bool> available, Func<bool> ready = null, string artifact = "")
         {
@@ -312,13 +332,7 @@ namespace Certitude
             if (target.ContextMenu == null && target is TextBox text)
             {
                 target.ContextMenu = new ContextMenu();
-                foreach (var command in new[] { System.Windows.Input.ApplicationCommands.Cut,
-                    System.Windows.Input.ApplicationCommands.Copy, System.Windows.Input.ApplicationCommands.Paste,
-                    System.Windows.Input.ApplicationCommands.SelectAll })
-                    if (!text.IsReadOnly || command == System.Windows.Input.ApplicationCommands.Copy ||
-                        command == System.Windows.Input.ApplicationCommands.SelectAll)
-                        target.ContextMenu.Items.Add(new MenuItem { Header = command.Text,
-                            Command = command, CommandTarget = text });
+                TextCommands(target.ContextMenu, text);
             }
             // Offer the same two destinations from certificate, request, template, and CRL surfaces.
             var menu = target.ContextMenu ??= new ContextMenu();
@@ -338,16 +352,36 @@ namespace Certitude
             menu.Opened += (sender, e) => Update();
         }
 
-        public static async Task ExportCertificate(DependencyObject owner, byte[] encoded, string fileName)
+        public static Task ExportCertificate(DependencyObject owner, byte[] encoded, string fileName) =>
+            SaveFile(owner, fileName, "DER Certificate|*.cer|PEM Certificate|*.pem",
+                format => CertificateUtilities.ExportPublic([encoded], format - 1));
+
+        public static async Task<string> SaveFile(DependencyObject owner, string fileName, string filter,
+            Func<int, byte[]> contents, TextBlock status = null)
         {
-            // Save the certificate in the format chosen by the workspace file picker.
-            var save = new FilePicker(true) { FileName = fileName,
-                Filter = "DER Certificate|*.cer|PEM Certificate|*.pem", Owner = owner };
-            if (await save.ShowAsync() != true) return;
-            try { CertificateUtilities.WriteAtomic(save.FileName, CertificateUtilities.ExportPublic(
-                new[] { encoded }, save.FilterIndex - 1)); }
-            catch (Exception error) { ((MainWindow)Application.Current.MainWindow).Notify(CaAdministration.Error(error)); }
+            // Generate the selected format only after the user accepts the destination.
+            var picker = await FilePicker.ChooseSave(owner, fileName, filter);
+            if (picker == null) return null;
+            try
+            {
+                CertificateUtilities.WriteAtomic(picker.FileName, contents(picker.FilterIndex));
+                return picker.FileName;
+            }
+            catch (Exception error)
+            {
+                var message = CaAdministration.Error(error);
+                if (status != null) status.Text = message;
+                else ((MainWindow)Application.Current.MainWindow).Notify(message);
+                return null;
+            }
         }
+
+        internal static bool IsRowClick(DataGrid grid, MouseButtonEventArgs e) =>
+            e.OriginalSource is DependencyObject source &&
+            ItemsControl.ContainerFromElement(grid, source) is DataGridRow;
+
+        public static void OnRowDoubleClick(DataGrid grid, Action action) =>
+            grid.MouseDoubleClick += (sender, e) => { if (IsRowClick(grid, e)) action(); };
 
         internal static void SelectContextRow(DataGrid grid, DependencyObject source)
         {
@@ -556,13 +590,7 @@ namespace Certitude
                 Dialogs.WindowsCertificate(this, detail.Certificate)).IsEnabled = detail.Certificate != null;
 
             // Provide a separate wrapping preview for the selected property value.
-            var value = new TextBox
-            {
-                IsReadOnly = true, AcceptsReturn = true, Height = 110, Margin = new Thickness(0, 6, 0, 0),
-                TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                VerticalContentAlignment = VerticalAlignment.Top
-            };
+            var value = Dialogs.OutputBox(110, new Thickness(0, 6, 0, 0));
             DockPanel.SetDock(value, Dock.Bottom);
             layout.Children.Add(value);
 

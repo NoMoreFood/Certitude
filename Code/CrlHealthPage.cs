@@ -43,7 +43,7 @@ namespace Certitude
                 token.ThrowIfCancellationRequested();
                 try
                 {
-                    CaAdministration.Use(configuration, admin =>
+                    CaAdministration.Use(admin =>
                     {
                         var keys = ReadSignersAndKeys(configuration, admin, signers, token, report);
 
@@ -90,7 +90,6 @@ namespace Certitude
                                 catch (Exception error) { Failed(item, error); }
                             }
                         }
-                        return true;
                     });
                 }
                 catch (OperationCanceledException) { throw; }
@@ -264,13 +263,10 @@ namespace Certitude
         private readonly ObservableCollection<CrlHealthEntry> entries = new ObservableCollection<CrlHealthEntry>();
         private readonly DataGrid grid = new DataGrid { SelectionMode = DataGridSelectionMode.Single,
             RowHeight = double.NaN, MinRowHeight = 24, ColumnHeaderHeight = double.NaN };
-        private readonly TextBox details = new TextBox { IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
-            AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalContentAlignment = VerticalAlignment.Top };
+        private readonly TextBox details = Dialogs.OutputBox();
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
         private readonly Button refresh, cancel, report;
         private CancellationTokenSource cancellation;
-        private bool initialized;
 
         public CrlHealthPage(CertificateStore store)
         {
@@ -287,12 +283,7 @@ namespace Certitude
             var actions = new WrapPanel();
             header.Children.Add(actions);
             refresh = Dialogs.Button(actions, "_Refresh", async () => await Refresh());
-            cancel = Dialogs.Button(actions, "_Cancel", () =>
-            {
-                cancellation?.Cancel();
-                cancel.IsEnabled = false;
-                status.Text = "Cancelling after the current native call returns…";
-            });
+            cancel = Dialogs.Button(actions, "_Cancel", Cancel);
             cancel.IsEnabled = false;
             report = Dialogs.Button(actions, "View _Report…", () =>
             {
@@ -337,20 +328,20 @@ namespace Certitude
             content.Children.Add(details);
             layout.Children.Add(content);
             Content = layout;
-            Loaded += async (sender, e) =>
-            {
-                if (initialized) return;
-                initialized = true;
-                await Refresh();
-            };
+            OnFirstLoad(Refresh);
             Closing += (sender, e) =>
             {
                 if (cancellation == null) return;
-                cancellation.Cancel();
-                cancel.IsEnabled = false;
-                status.Text = "Cancelling after the current native call returns…";
+                Cancel();
                 e.Cancel = true;
             };
+        }
+
+        private void Cancel()
+        {
+            cancellation?.Cancel();
+            cancel.IsEnabled = false;
+            status.Text = "Cancelling after the current native call returns…";
         }
 
         private async Task Refresh()

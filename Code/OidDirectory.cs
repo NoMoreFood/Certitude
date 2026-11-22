@@ -44,9 +44,10 @@ namespace Certitude
             "systemFlags", "msPKI-OIDLocalizedName", "msPKI-OID-CPS" };
         public string Server { get; }
         public string ConfigurationName { get; }
-        public string ContainerName => "CN=OID,CN=Public Key Services,CN=Services," + ConfigurationName;
-        internal string TemplatesName => "CN=Certificate Templates,CN=Public Key Services,CN=Services," +
-            ConfigurationName;
+        internal const string PublicKeyServices = "CN=Public Key Services,CN=Services,";
+        internal string ServicesName => PublicKeyServices + ConfigurationName;
+        public string ContainerName => "CN=OID," + ServicesName;
+        internal string TemplatesName => "CN=Certificate Templates," + ServicesName;
 
         private OidDirectory(string server, string configuration)
         {
@@ -77,14 +78,15 @@ namespace Certitude
 
         internal DirectoryEntry Open(string name) => Bind("LDAP://" + Server + "/" + name);
 
-        private static DirectorySearcher Search(DirectoryEntry root, string filter, string[] attributes) =>
-            new DirectorySearcher(root, filter, attributes, SearchScope.Subtree)
+        internal static DirectorySearcher Search(DirectoryEntry root, string filter, string[] attributes,
+            SearchScope scope = SearchScope.Subtree, int seconds = 30) =>
+            new DirectorySearcher(root, filter, attributes, scope)
             {
-                PageSize = 1000, ClientTimeout = TimeSpan.FromSeconds(30),
-                ServerTimeLimit = TimeSpan.FromSeconds(30), ReferralChasing = ReferralChasingOption.None
+                PageSize = 1000, ClientTimeout = TimeSpan.FromSeconds(seconds),
+                ServerTimeLimit = TimeSpan.FromSeconds(seconds), ReferralChasing = ReferralChasingOption.None
             };
 
-        private static string Text(SearchResult result, string name) =>
+        internal static string Text(SearchResult result, string name) =>
             result.Properties[name].Count == 0 ? "" : Convert.ToString(result.Properties[name][0]);
 
         // Project directory attributes into the policy metadata and removal safeguards shown in the UI.

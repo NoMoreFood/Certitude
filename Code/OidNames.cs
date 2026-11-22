@@ -17,37 +17,27 @@ using System.Text;
 
 namespace Certitude
 {
-    internal sealed class TemplateIdentity
+    internal sealed class TemplateIdentity(string name, string displayName, string oid)
     {
-        public string Name { get; }
-        public string DisplayName { get; }
-        public string Oid { get; }
-        public string Label { get; }
+        public string Name { get; } = name;
+        public string DisplayName { get; } = displayName;
+        public string Oid { get; } = oid;
 
-        public TemplateIdentity(string name, string displayName, string oid)
-        {
-            // Keep the template identities together and build a label without duplicate names.
-            Name = name;
-            DisplayName = displayName;
-            Oid = oid;
-            Label = DisplayName + (Name == DisplayName || Name.Length == 0 ? "" : " · " + Name) +
-                (Oid.Length == 0 || Oid == DisplayName ? "" : " (" + Oid + ")");
-        }
+        // Keep the template identities together and build a label without duplicate names.
+        public string Label { get; } = displayName + (name == displayName || name.Length == 0 ? "" : " · " + name) +
+            (oid.Length == 0 || oid == displayName ? "" : " (" + oid + ")");
     }
 
     internal sealed class OidNames
     {
-        private readonly Dictionary<string, Dictionary<uint, HashSet<string>>> names =
-            new Dictionary<string, Dictionary<uint, HashSet<string>>>(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<string, string> resolved = new ConcurrentDictionary<string, string>();
-        private readonly Dictionary<string, TemplateIdentity> templates =
-            new Dictionary<string, TemplateIdentity>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Dictionary<uint, HashSet<string>>> names = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, string> resolved = new();
+        private readonly Dictionary<string, TemplateIdentity> templates = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, TemplateIdentity> templateCache =
-            new ConcurrentDictionary<string, TemplateIdentity>(StringComparer.OrdinalIgnoreCase);
-        private static readonly ConcurrentDictionary<string, string> windowsNames =
-            new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+            new(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, string> windowsNames = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, Lazy<OidNames>> catalogs =
-            new ConcurrentDictionary<string, Lazy<OidNames>>(StringComparer.OrdinalIgnoreCase);
+            new(StringComparer.OrdinalIgnoreCase);
         private DateTime expires;
         private Func<OidNames> refresh;
         public static OidNames Local => Load();
@@ -109,16 +99,6 @@ namespace Certitude
                 Marshal.PtrToStringUni(Marshal.PtrToStructure<NativeOidInfo>(found).Name) ?? value;
         });
 
-        private static string Text(SearchResult result, string name) =>
-            result.Properties[name].Count == 0 ? "" : Convert.ToString(result.Properties[name][0]);
-
-        private static DirectorySearcher Search(DirectoryEntry root, string filter, params string[] properties) =>
-            new DirectorySearcher(root, filter, properties, SearchScope.Subtree)
-            {
-                PageSize = 1000, ClientTimeout = TimeSpan.FromSeconds(10),
-                ServerTimeLimit = TimeSpan.FromSeconds(10), ReferralChasing = ReferralChasingOption.None
-            };
-
         private static string Escape(string value) => value.Replace("\\", "\\5c").Replace("*", "\\2a")
             .Replace("(", "\\28").Replace(")", "\\29").Replace("\0", "\\00");
 
@@ -135,15 +115,14 @@ namespace Certitude
                 try
                 {
                     // Reuse the current forest only when its enrollment entry matches this CA.
-                    using var root = directory.Open("CN=Enrollment Services,CN=Public Key Services,CN=Services," +
-                        directory.ConfigurationName);
-                    using var search = Search(root, "(&(objectClass=pKIEnrollmentService)(cn=" + Escape(parts[1]) + "))",
-                        "dNSHostName");
+                    using var root = directory.Open("CN=Enrollment Services," + directory.ServicesName);
+                    var filter = "(&(objectClass=pKIEnrollmentService)(cn=" + Escape(parts[1]) + "))";
+                    using var search = OidDirectory.Search(root, filter, ["dNSHostName"], seconds: 10);
                     using var results = search.FindAll();
-                    if (results.Cast<SearchResult>().Any(result =>
-                        string.Equals(Text(result, "dNSHostName"), parts[0], StringComparison.OrdinalIgnoreCase) ||
-                        (parts[0].IndexOf('.') < 0 && string.Equals(Text(result, "dNSHostName").Split('.')[0],
-                            parts[0], StringComparison.OrdinalIgnoreCase)))) return directory;
+                    var hosts = results.Cast<SearchResult>().Select(result => OidDirectory.Text(result, "dNSHostName"));
+                    if (hosts.Any(host => string.Equals(host, parts[0], StringComparison.OrdinalIgnoreCase) ||
+                        (!parts[0].Contains(".") && string.Equals(host.Split('.')[0], parts[0],
+                            StringComparison.OrdinalIgnoreCase)))) return directory;
                 }
                 catch (Exception) { }
             }
@@ -176,16 +155,16 @@ namespace Certitude
             try
             {
                 using var root = directory.Open(directory.ContainerName);
-                using var search = Search(root, "(objectClass=msPKI-Enterprise-Oid)",
-                    "msPKI-Cert-Template-OID", "displayName", "flags");
+                using var search = OidDirectory.Search(root, "(objectClass=msPKI-Enterprise-Oid)",
+                    ["msPKI-Cert-Template-OID", "displayName", "flags"], seconds: 10);
                 using var rows = search.FindAll();
                 foreach (SearchResult row in rows)
                 {
                     // Associate each directory name with its policy or template category.
-                    var oid = Text(row, "msPKI-Cert-Template-OID");
-                    var name = Text(row, "displayName");
+                    var oid = OidDirectory.Text(row, "msPKI-Cert-Template-OID");
+                    var name = OidDirectory.Text(row, "displayName");
                     if (oid.Length == 0 || name.Length == 0) continue;
-                    var flags = Text(row, "flags");
+                    var flags = OidDirectory.Text(row, "flags");
                     result.AddName(oid, name, flags == "1" ? 9U : flags == "2" ? 8U : flags == "3" ? 7U : 0U);
                     if (flags == "1") result.templates[oid] = new TemplateIdentity("", name, oid);
                 }
@@ -196,22 +175,21 @@ namespace Certitude
             try
             {
                 using var root = directory.Open(directory.TemplatesName);
-                using var search = Search(root, "(objectClass=pKICertificateTemplate)",
-                    "cn", "displayName", "msPKI-Cert-Template-OID");
+                using var search = OidDirectory.Search(root, "(objectClass=pKICertificateTemplate)",
+                    ["cn", "displayName", "msPKI-Cert-Template-OID"], seconds: 10);
                 using var rows = search.FindAll();
                 foreach (SearchResult row in rows)
                 {
                     // Index each template by name and OID, preferring its own display name.
-                    var name = Text(row, "cn");
+                    var name = OidDirectory.Text(row, "cn");
                     if (name.Length == 0) continue;
-                    var display = Text(row, "displayName");
+                    var display = OidDirectory.Text(row, "displayName");
                     var template = new TemplateIdentity(name, display.Length == 0 ? name : display,
-                        Text(row, "msPKI-Cert-Template-OID"));
+                        OidDirectory.Text(row, "msPKI-Cert-Template-OID"));
                     result.templates[name] = template;
                     if (template.Oid.Length == 0) continue;
                     result.templates[template.Oid] = template;
-                    result.AddName(template.Oid, template.DisplayName, 9);
-                    result.names[template.Oid][9] = new HashSet<string> { template.DisplayName };
+                    result.Groups(template.Oid)[9] = [template.DisplayName];
                 }
             }
             catch (Exception error) { issues.Add("Templates: " + CaAdministration.Error(error)); }
@@ -238,10 +216,13 @@ namespace Certitude
             });
         }
 
+        private Dictionary<uint, HashSet<string>> Groups(string oid) =>
+            names.TryGetValue(oid, out var groups) ? groups : names[oid] = new();
+
         private void AddName(string oid, string name, uint group)
         {
             // Retain distinct names per OID category instead of overwriting alternate labels.
-            if (!names.TryGetValue(oid, out var groups)) names[oid] = groups = new Dictionary<uint, HashSet<string>>();
+            var groups = Groups(oid);
             if (!groups.TryGetValue(group, out var values)) groups[group] = values = new HashSet<string>();
             values.Add(name);
         }
@@ -487,7 +468,8 @@ namespace Certitude
             return names.ToArray();
         }
 
-        internal static int ReadElement(byte[] bytes, ref int position, int end, out int valueEnd)
+        internal static int ReadElement(byte[] bytes, ref int position, int end, out int valueEnd,
+            bool canonicalLength = false)
         {
             // Read the DER tag, including any extended tag-number bytes.
             if (position >= end) throw new CryptographicException("Truncated DER tag.");
@@ -505,7 +487,8 @@ namespace Certitude
             if ((length & 128) != 0)
             {
                 var count = length & 127;
-                if (count == 0 || count > 4 || count > end - position)
+                if (count == 0 || count > 4 || count > end - position ||
+                    (canonicalLength && (bytes[position] == 0 || (count == 1 && bytes[position] < 128))))
                     throw new CryptographicException("Invalid DER length.");
                 length = 0;
                 for (var i = 0; i < count; i++)

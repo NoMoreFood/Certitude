@@ -195,9 +195,11 @@ namespace Certitude
                 var from = ReadDate(ExpiresFrom);
                 var before = ReadDate(ExpiresBefore);
                 TimeDisplay.Current.UseUtc = UtcToggle.IsChecked == true;
-                restoringView = true;
-                try { ExpiresFrom.Text = TimeDisplay.Entry(from); ExpiresBefore.Text = TimeDisplay.Entry(before); }
-                finally { restoringView = false; }
+                WithoutFiltering(() =>
+                {
+                    ExpiresFrom.Text = TimeDisplay.Entry(from);
+                    ExpiresBefore.Text = TimeDisplay.Entry(before);
+                });
                 foreach (var page in workspace) page.RefreshTimes(previousUtc);
                 PersistWorkspace();
             }
@@ -381,18 +383,22 @@ namespace Certitude
             catch (ArgumentException error) { SearchHint.Text = error.Message; }
         }
 
+        private void WithoutFiltering(Action change)
+        {
+            var previous = restoringView;
+            restoringView = true;
+            try { change(); }
+            finally { restoringView = previous; }
+        }
+
         private void FilterChanged(object sender, RoutedEventArgs e)
         {
             // Reject edits during protected work and restore a view change if navigation is blocked.
             if (!IsLoaded || busy || store == null || restoringView) return;
             if (ReferenceEquals(sender, Views) && !ReturnToBrowser())
             {
-                restoringView = true;
-                try
-                {
-                    Views.SelectedItem = ((SelectionChangedEventArgs)e).RemovedItems.Cast<object>().FirstOrDefault();
-                }
-                finally { restoringView = false; }
+                var previous = ((SelectionChangedEventArgs)e).RemovedItems.Cast<object>().FirstOrDefault();
+                WithoutFiltering(() => Views.SelectedItem = previous);
                 return;
             }
             // Cancel stale lookups before scheduling a fresh query for changed filters.
@@ -500,14 +506,12 @@ namespace Certitude
                 ExpiryPresets.SelectedItem is not ComboBoxItem item ||
                 !int.TryParse(Convert.ToString(item.Tag), out var days)) return;
             var changingView = Views.SelectedIndex != 0;
-            restoringView = true;
-            try
+            WithoutFiltering(() =>
             {
                 Views.SelectedIndex = 0;
                 expiryDays = days >= 0 ? days : (int?)null;
                 ExpiresFrom.Text = ExpiresBefore.Text = "";
-            }
-            finally { restoringView = false; }
+            });
 
             // A preset also switches to Issued Certificates, so remove rows from the previous view immediately.
             if (changingView) ClearViewRows();
@@ -696,13 +700,12 @@ namespace Certitude
                 new[] { "Release Certificate _Hold", "Release hold", Glyphs.Refresh },
                 new[] { "Set Request _Attributes…", "Set attributes", Glyphs.Edit }
             })
-                Dialogs.MenuItem(menu, action[0], action[2], action[1],
-                    () => ActionClick(new MenuItem { Tag = action[1] }, new RoutedEventArgs()));
+                Dialogs.MenuItem(menu, action[0], action[2], action[1], async () => await RunAction(action[1]));
 
             // Separate database deletion from selection and refresh commands.
             menu.Items.Add(new Separator());
             Dialogs.MenuItem(menu, "Delete From Data_base…", Glyphs.Delete, "Delete",
-                () => ActionClick(new MenuItem { Tag = "Delete" }, new RoutedEventArgs()), "Delete");
+                async () => await RunAction("Delete"), "Delete");
             menu.Items.Add(new Separator());
             Dialogs.MenuItem(menu, "Select This _Page", Glyphs.SelectAll,
                 "Select page", Certificates.SelectAll, "Ctrl+A");
@@ -727,71 +730,47 @@ namespace Certitude
             var ready = !busy && queryLoads == 0 && !filtersDirty && store != null && workspace.Count == 0;
             var any = ready && selected.Length > 0;
             var view = Convert.ToString((Views.SelectedItem as ListBoxItem)?.Tag);
+            var row = selected.Length == 1 ? selected[0] : null;
             var toolbar = ActionsPanel.Children.OfType<Button>().ToArray();
             foreach (var item in Certificates.ContextMenu.Items.OfType<MenuItem>().Cast<FrameworkElement>()
                 .Concat(recordComparisonMenu.Items.OfType<MenuItem>())
                 .Concat(MoreActions.Items.OfType<ComboBoxItem>()).Concat(toolbar))
             {
                 // Enable each action only when every selected record supports it.
-                switch ((string)item.Tag)
+                bool? enabled = (string)item.Tag switch
                 {
-                    case "Comparison": item.IsEnabled = any && selected.Length == 1; break;
-                    case "Compare Certificate basis":
-                    case "Compare Certificate with":
-                        item.IsEnabled = any && selected.Length == 1 && selected[0].NotAfter.HasValue; break;
-                    case "Compare CSR basis":
-                    case "Compare CSR with": item.IsEnabled = any && selected.Length == 1; break;
-                    case "Compare Template basis":
-                    case "Compare Template with":
-                        item.IsEnabled = any && selected.Length == 1 && !string.IsNullOrEmpty(selected[0].Template); break;
-                    case "Open": item.IsEnabled = any && selected.Length == 1; break;
-                    case "Windows":
-                    case "Export":
-                    case "Validate":
-                        item.IsEnabled = any && selected.Length == 1 && selected[0].NotAfter.HasValue; break;
-                    case "Copy IDs": item.IsEnabled = any; break;
-                    case "Copy serials":
-                        item.IsEnabled = any && selected.All(row => !string.IsNullOrEmpty(row.SerialNumber)); break;
-                    case "Issue":
-                        item.IsEnabled = any && selected.All(row => row.Disposition == 9 || row.Disposition == 31); break;
-                    case "Deny":
-                    case "Set attributes": item.IsEnabled = any && selected.All(row => row.Disposition == 9); break;
-                    case "Extension":
-                        item.IsEnabled = any && selected.Length == 1 && selected[0].Disposition == 9; break;
-                    case "Archived key":
-                        item.IsEnabled = any && selected.Length == 1 && selected[0].Disposition == 20; break;
-                    case "Revoke": item.IsEnabled = any && selected.All(row => row.Disposition == 20); break;
-                    case "Release hold":
-                        item.IsEnabled = any && selected.All(row => row.Disposition == 21 && row.RevocationReason == 6);
-                        break;
-                    case "Delete": item.IsEnabled = any; break;
-                    case "Select page": item.IsEnabled = ready && Certificates.Items.Count > 0; break;
-                    case "Refresh":
-                        item.IsEnabled = !busy && queryLoads == 0 && store != null && workspace.Count == 0; break;
-                    case "Columns": item.IsEnabled = !busy && workspace.Count == 0; break;
-                }
+                    string action when action == "Comparison" || action.StartsWith("Compare ", StringComparison.Ordinal)
+                        => ready && Applicable(item),
+                    "Open" => ready && row != null,
+                    "Windows" or "Export" or "Validate" => ready && row?.NotAfter != null,
+                    "Copy IDs" or "Delete" => any,
+                    "Copy serials" => any && selected.All(item => !string.IsNullOrEmpty(item.SerialNumber)),
+                    "Issue" => any && selected.All(item => item.Disposition is 9 or 31),
+                    "Deny" or "Set attributes" => any && selected.All(item => item.Disposition == 9),
+                    "Extension" => ready && row?.Disposition == 9,
+                    "Archived key" => ready && row?.Disposition == 20,
+                    "Revoke" => any && selected.All(item => item.Disposition == 20),
+                    "Release hold" => any && selected.All(item => item.Disposition == 21 && item.RevocationReason == 6),
+                    "Select page" => ready && Certificates.Items.Count > 0,
+                    "Refresh" => !busy && queryLoads == 0 && store != null && workspace.Count == 0,
+                    "Columns" => !busy && workspace.Count == 0,
+                    _ => null
+                };
+                if (enabled.HasValue) item.IsEnabled = enabled.Value;
             }
             // Determine which operations can apply to the selected certificate or request view.
-            bool Applicable(FrameworkElement item)
+            bool Applicable(FrameworkElement item) => (string)item.Tag switch
             {
-                if ((string)item.Tag == "Comparison") return selected.Length == 1;
-                if (((string)item.Tag)?.StartsWith("Compare ", StringComparison.Ordinal) == true)
-                    return selected.Length == 1 && ((string)item.Tag switch
-                    {
-                        "Compare Certificate basis" or "Compare Certificate with" => selected[0].NotAfter.HasValue,
-                        "Compare Template basis" or "Compare Template with" => !string.IsNullOrEmpty(selected[0].Template),
-                        _ => true
-                    });
-                if (view.Length == 0) return true;
-                return (string)item.Tag switch
-                {
-                    "Windows" or "Export" or "Validate" or "Copy serials" => view is "20" or "21",
-                    "Issue" => view is "9" or "31",
-                    "Deny" or "Set attributes" or "Extension" => view == "9",
-                    "Archived key" or "Revoke" => view == "20",
-                    "Release hold" => view == "21", _ => true
-                };
-            }
+                "Comparison" or "Compare CSR basis" or "Compare CSR with" => row != null,
+                "Compare Certificate basis" or "Compare Certificate with" => row?.NotAfter != null,
+                "Compare Template basis" or "Compare Template with" => !string.IsNullOrEmpty(row?.Template),
+                _ when view.Length == 0 => true,
+                "Windows" or "Export" or "Validate" or "Copy serials" => view is "20" or "21",
+                "Issue" => view is "9" or "31",
+                "Deny" or "Set attributes" or "Extension" => view == "9",
+                "Archived key" or "Revoke" => view == "20",
+                "Release hold" => view == "21", _ => true
+            };
             // Hide irrelevant actions in both menus and remove empty context-menu separators.
             Dialogs.FilterMenu(Certificates.ContextMenu, Applicable);
             foreach (var item in MoreActions.Items.OfType<ComboBoxItem>().Cast<FrameworkElement>()
@@ -803,11 +782,16 @@ namespace Certitude
             }
         }
 
+        private bool TrySelectedRow(out CertificateRow row)
+        {
+            row = Certificates.SelectedItem as CertificateRow;
+            return !busy && queryLoads == 0 && !filtersDirty && store != null && row != null;
+        }
+
         private async Task SelectedCertificate(bool validate, bool windows = false)
         {
             // Require one current row before retrieving its certificate from the owning CA.
-            if (busy || queryLoads > 0 || filtersDirty || store == null ||
-                Certificates.SelectedItems.Count != 1 || Certificates.SelectedItem is not CertificateRow row) return;
+            if (!TrySelectedRow(out var row) || Certificates.SelectedItems.Count != 1) return;
             await Run("Loading certificate…", async token =>
             {
                 // Retain full validation context and use a certificate-only query for viewing or export.
@@ -828,22 +812,23 @@ namespace Certitude
         private void CompareRecord(string action)
         {
             // Keep request IDs scoped to the selected row's authority, including All CAs results.
-            if (busy || queryLoads > 0 || filtersDirty || Certificates.SelectedItems.Count != 1 ||
-                Certificates.SelectedItem is not CertificateRow row) return;
+            if (!TrySelectedRow(out var row) || Certificates.SelectedItems.Count != 1) return;
             var configuration = store.ForRow(row).Configuration;
             var source = action.Contains("Template") ? ComparisonSource.Template("", row.Template, configuration) :
                 ComparisonSource.Record(configuration, row.RequestId, action.Contains("CSR"));
             OpenComparison(source, action.EndsWith(" basis", StringComparison.Ordinal));
         }
 
-        private async void ActionClick(object sender, RoutedEventArgs e)
+        private async void ActionClick(object sender, RoutedEventArgs e) =>
+            await RunAction((string)((FrameworkElement)sender).Tag);
+
+        private async Task RunAction(string action)
         {
             // Capture the selected records and requested action before collecting operation options.
             if (busy || queryLoads > 0 || filtersDirty || store == null) return;
             var selected = Certificates.SelectedItems.Cast<CertificateRow>().ToArray();
             if (selected.Length == 0) return;
             var source = store;
-            var action = Convert.ToString(((FrameworkElement)sender).Tag);
             var reason = 0;
             DateTime? effective = null;
             var attributes = "";
@@ -913,7 +898,7 @@ namespace Certitude
         private async void OpenClick(object sender, RoutedEventArgs e)
         {
             // Load the selected request details through its originating CA connection.
-            if (busy || queryLoads > 0 || filtersDirty || Certificates.SelectedItem is not CertificateRow row) return;
+            if (!TrySelectedRow(out var row)) return;
             await Run("Loading request details…", async token =>
             {
                 var source = store.ForRow(row);
@@ -927,15 +912,14 @@ namespace Certitude
         private void GridDoubleClick(object sender, MouseButtonEventArgs e)
         {
             // Open request details only when the double-click lands on a data row.
-            if (ItemsControl.ContainerFromElement(Certificates, e.OriginalSource as DependencyObject) is DataGridRow)
+            if (Dialogs.IsRowClick(Certificates, e))
                 OpenClick(sender, e);
         }
 
         private async void ExtensionClick(object sender, RoutedEventArgs e)
         {
             // Ignore extension actions while results are stale or another operation is active.
-            if (busy || queryLoads > 0 || filtersDirty || store == null ||
-                Certificates.SelectedItem is not CertificateRow row) return;
+            if (!TrySelectedRow(out var row)) return;
             try
             {
                 // Require one pending request and collect its replacement extension data.
@@ -970,18 +954,16 @@ namespace Certitude
         private async void ArchivedKeyClick(object sender, RoutedEventArgs e)
         {
             // Resolve the selected request CA and choose a recovery-blob output file.
-            if (busy || queryLoads > 0 || filtersDirty || store == null ||
-                Certificates.SelectedItem is not CertificateRow row) return;
+            if (!TrySelectedRow(out var row)) return;
             var configuration = store.ForRow(row).Configuration;
-            var save = new FilePicker(true) { FileName = row.RequestId + "-archived-key.p7b", Filter = "Recovery Blob|*.p7b" };
-            if (await save.ShowAsync() != true) return;
+            var save = await FilePicker.ChooseSave(this, row.RequestId + "-archived-key.p7b", "Recovery Blob|*.p7b");
+            if (save == null) return;
             await Run("Retrieving encrypted archived key…", async token =>
             {
                 // Retrieve the encrypted archived key without attempting to decrypt it.
                 await Task.Run(() =>
                 {
-                    var encoded = CaAdministration.Use(configuration,
-                        admin => admin.GetArchivedKey(configuration, row.RequestId, 1));
+                    var encoded = CaAdministration.Use(admin => admin.GetArchivedKey(configuration, row.RequestId, 1));
                     token.ThrowIfCancellationRequested();
                     CertificateUtilities.WriteAtomic(save.FileName, Convert.FromBase64String(encoded));
                 });
@@ -994,8 +976,8 @@ namespace Certitude
         {
             // Choose an output file before exporting the entire applied query.
             if (busy || queryLoads > 0 || filtersDirty || query == null) return;
-            var save = new FilePicker(true) { FileName = "certificates.csv", Filter = "CSV|*.csv" };
-            if (await save.ShowAsync() != true) return;
+            var save = await FilePicker.ChooseSave(this, "certificates.csv", "CSV|*.csv");
+            if (save == null) return;
             var source = store;
             var spec = query;
             await Run("Exporting all records matching the applied query…", async token =>
@@ -1101,7 +1083,7 @@ namespace Certitude
                 if (e.Key == Key.Enter && Certificates.SelectedItems.Count == 1)
                 { OpenClick(sender, e); e.Handled = true; }
                 if (e.Key == Key.Delete)
-                { ActionClick(new MenuItem { Tag = "Delete" }, e); e.Handled = true; }
+                { e.Handled = true; await RunAction("Delete"); }
             }
             // Use Ctrl+F to focus browser search.
             if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control) { SearchBox.Focus(); e.Handled = true; }
@@ -1174,7 +1156,7 @@ namespace Certitude
 
         private void BackClick(object sender, RoutedEventArgs e) => workspace.LastOrDefault()?.Close();
 
-        private void MoreActionClick(object sender, SelectionChangedEventArgs e)
+        private async void MoreActionClick(object sender, SelectionChangedEventArgs e)
         {
             // Reset the action selector and dispatch only visible, enabled choices.
             if (!IsLoaded || MoreActions.SelectedItem is not ComboBoxItem item) return;
@@ -1186,7 +1168,7 @@ namespace Certitude
             if (action.StartsWith("Compare ", StringComparison.Ordinal)) CompareRecord(action);
             else if (action == "Extension") ExtensionClick(sender, e);
             else if (action == "Archived key") ArchivedKeyClick(sender, e);
-            else ActionClick(new Button { Tag = action }, e);
+            else await RunAction(action);
         }
 
         private async void DiscoverClick(object sender, RoutedEventArgs e) => await DiscoverAuthorities();
@@ -1203,15 +1185,12 @@ namespace Certitude
         {
             // Merge discovered CA names while preserving the currently typed connection target.
             var current = ConfigurationBox.Text;
-            var previous = restoringView;
-            restoringView = true;
-            try
+            WithoutFiltering(() =>
             {
                 configurations = CaDirectory.Configurations(discovered.Concat(configurations));
                 ConfigurationBox.ItemsSource = new[] { AllAuthoritiesCaption }.Concat(configurations).ToArray();
                 ConfigurationBox.Text = ConfigurationCaption(current);
-            }
-            finally { restoringView = previous; }
+            });
         }
 
         private async Task DiscoverAuthorities(bool showBusy = true)

@@ -14,54 +14,24 @@ using System.Windows.Input;
 
 namespace Certitude
 {
-    internal sealed class PublishedPage : WorkspacePage
+    internal sealed class PublishedPage : DirectoryPage
     {
-        private readonly DockPanel layout = new DockPanel { Margin = new Thickness(8) };
-        private readonly TextBox server = new TextBox { Width = 360, Margin = new Thickness(0, 0, 8, 4) };
         private readonly ComboBox stores = new ComboBox { Width = 240, DisplayMemberPath = "Name" };
         private readonly TextBox search = new TextBox { Width = 340, Margin = new Thickness(0, 0, 0, 4) };
-        private readonly TextBlock target = new TextBlock { TextWrapping = TextWrapping.Wrap };
-        private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
-        private readonly TextBox details = new TextBox { IsReadOnly = true, AcceptsReturn = true, Height = 100,
-            TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalContentAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 5, 0, 5) };
+        private readonly TextBox details = Dialogs.OutputBox(100, new Thickness(0, 5, 0, 5));
         private readonly DataGrid grid = new DataGrid { SelectionMode = DataGridSelectionMode.Single };
         private readonly Button add, remove, view, inspect, export;
-        private readonly Action<string> record;
         private PublishedDirectory directory;
         private PublishedStore loadedStore;
         private PublishedSnapshot snapshot = new PublishedSnapshot();
-        private bool initialized;
-        internal bool IsBusy
-        {
-            get;
-            // Keep publication controls disabled while directory reads or writes are in progress.
-            private set { field = value; layout.IsEnabled = !value; }
-        }
 
-        public PublishedPage(Action<string> log = null)
+        public PublishedPage(Action<string> log = null) : base(log)
         {
             // Create the forest publication page and explain the scope of directory changes.
-            record = log ?? (text => { });
             Title = "Forest Published";
-            var header = new StackPanel();
-            DockPanel.SetDock(header, Dock.Top);
-            layout.Children.Add(header);
-            Dialogs.Note(header, "Review and manage certificates and revocation lists published in the forest " +
-                "using your Windows identity. Changes require directory permissions " +
-                "and replicate through Active Directory.");
-
-            // Keep directory discovery beside its input and make the forest-wide result scope explicit.
-            header.Children.Add(Glyphs.Label("Domain / Domain Controller (Blank = Automatic)"));
-            var connection = new WrapPanel();
-            connection.Children.Add(server);
-            Dialogs.Button(connection, "_Load Directory", async () => await Refresh(true));
-            header.Children.Add(connection);
-            var scope = new TextBlock { Text = "Forest-Wide Results", FontSize = 10,
-                Margin = new Thickness(0, 0, 0, 4) };
-            scope.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
-            header.Children.Add(scope);
-            header.Children.Add(target);
+            var header = DirectoryHeader("Review and manage certificates and revocation lists published in the " +
+                "forest using your Windows identity. Changes require directory permissions and replicate through " +
+                "Active Directory.", () => Refresh(true));
 
             // Expose refresh and publication management actions above the result table.
             var actions = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
@@ -79,11 +49,7 @@ namespace Certitude
             stores.ItemsSource = PublishedDirectory.Stores;
             stores.SelectedIndex = 0;
             filters.Children.Add(stores);
-            var label = Glyphs.Label("Search", true);
-            label.Target = search;
-            label.Margin = new Thickness(0, 0, 6, 4);
-            filters.Children.Add(label);
-            filters.Children.Add(search);
+            Dialogs.InlineField(filters, "Search", search, new Thickness(0, 0, 6, 4));
             header.Children.Add(filters);
             search.ToolTip = "Filter by subject, issuer, thumbprint / SHA-256, " +
                 "CRL number, status or publication object.";
@@ -133,15 +99,10 @@ namespace Certitude
 
             // Open certificates in Windows and show CRL details inline on row double-click.
             grid.SelectionChanged += (sender, e) => SelectionChanged();
-            grid.MouseDoubleClick += (sender, e) =>
-            {
-                if (ItemsControl.ContainerFromElement(grid, e.OriginalSource as DependencyObject) is DataGridRow)
-                    View();
-            };
+            Dialogs.OnRowDoubleClick(grid, View);
 
             // React to search and store changes without reusing a different target snapshot.
             search.TextChanged += (sender, e) => Filter();
-            stores.SelectionChanged += async (sender, e) => { if (initialized) await Refresh(); };
             server.TextChanged += (sender, e) =>
             {
                 // Clear directory results immediately when the connection target changes.
@@ -150,13 +111,6 @@ namespace Certitude
                 target.Text = "";
                 Filter();
                 status.Text = "Load The Directory To Review Its Published Artifacts.";
-            };
-            server.KeyDown += async (sender, e) =>
-            {
-                // Load the edited directory target when Enter is pressed.
-                if (e.Key != Key.Enter) return;
-                e.Handled = true;
-                await Refresh(true);
             };
             PreviewKeyDown += async (sender, e) =>
             {
@@ -167,14 +121,12 @@ namespace Certitude
                 if (e.Key == Key.Enter) { e.Handled = true; View(); }
             };
 
-            // Load the first snapshot once and prevent navigation during directory work.
-            Closing += (sender, e) => e.Cancel = IsBusy;
-            Loaded += async (sender, e) =>
+            // Begin responding to store changes when the first snapshot is requested.
+            OnFirstLoad(() =>
             {
-                if (initialized) return;
-                initialized = true;
-                await Refresh(true);
-            };
+                stores.SelectionChanged += async (sender, e) => await Refresh();
+                return Refresh(true);
+            });
             SelectionChanged();
         }
 
@@ -244,7 +196,7 @@ namespace Certitude
             "\r\nSize: " + CaServerStatistics.Size(row.Value.Length) +
             (row.PairSide.Length == 0 ? "" : "\r\nPair Direction: " + row.PairSide) + "\r\n\r\n" + row.Details;
 
-        private void SelectionChanged()
+        protected override void SelectionChanged()
         {
             // Enable and label actions according to the selected store and artifact type.
             var row = grid.SelectedItem as PublishedArtifact;
@@ -259,24 +211,6 @@ namespace Certitude
             export.IsEnabled = !IsBusy && row != null;
             TimeDisplay.Text(details, () => row == null ?
                 "Select A Published Artifact To Review Its Identity And AD Location." : Describe(row));
-        }
-
-        private async Task Run(string message, Func<Task> action)
-        {
-            // Serialize page operations and show progress with a busy cursor.
-            if (IsBusy) return;
-            using var cursor = BusyCursor.Enter();
-            IsBusy = true;
-            status.Text = message;
-            try { await action(); }
-            catch (Exception error) { status.Text = CaAdministration.Error(error); }
-            finally
-            {
-                // Restore the page and selected-row actions after each directory operation.
-                IsBusy = false;
-                SelectionChanged();
-                record(status.Text);
-            }
         }
 
         private Task Refresh(bool reconnect = false) => Run("Reading Published Artifacts…", async () =>
@@ -313,7 +247,7 @@ namespace Certitude
             if (await page.ShowAsync() != true) return;
             await Refresh();
             status.Text = loadedStore.ItemName + " Published To Active Directory. " + status.Text;
-            record(status.Text);
+            Record(status.Text);
         }
 
         private async Task Remove()
@@ -343,7 +277,7 @@ namespace Certitude
             if (!removed) return;
             await Refresh();
             status.Text = row.Store.ItemName + " Removed From AD Publication. " + status.Text;
-            record(status.Text);
+            Record(status.Text);
         }
 
         private void View()
@@ -372,10 +306,9 @@ namespace Certitude
                 await Dialogs.ExportCertificate(this, row.Certificate.Encoded, row.Certificate.Thumbprint + ".cer");
                 return;
             }
-            var save = new FilePicker(true) { Owner = this,
-                FileName = row.Fingerprint + (row.Crl != null ? ".crl" : ".bin"),
-                Filter = row.Crl != null ? "CRL|*.crl" : "Raw Value|*.bin" };
-            if (await save.ShowAsync() != true) return;
+            var save = await FilePicker.ChooseSave(this, row.Fingerprint + (row.Crl != null ? ".crl" : ".bin"),
+                row.Crl != null ? "CRL|*.crl" : "Raw Value|*.bin");
+            if (save == null) return;
             await Run("Exporting Published Value…", async () =>
             {
                 await Task.Run(() => CertificateUtilities.WriteAtomic(save.FileName, row.Encoded));
@@ -389,9 +322,7 @@ namespace Certitude
         private readonly DockPanel layout = new DockPanel { Margin = new Thickness(8) };
         private readonly TextBox file;
         private readonly ComboBox objectName;
-        private readonly TextBox preview = new TextBox { IsReadOnly = true, AcceptsReturn = true,
-            TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalContentAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 8, 0, 0) };
+        private readonly TextBox preview = Dialogs.OutputBox(margin: new Thickness(0, 8, 0, 0));
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
         private readonly PublishedDirectory directory;
         private readonly PublishedStore store;

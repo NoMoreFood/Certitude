@@ -17,14 +17,6 @@ using System.Threading;
 
 namespace Certitude
 {
-    internal sealed class StatisticsRecord
-    {
-        public CertificateRow Certificate { get; set; }
-        public DateTime? Submitted { get; set; }
-        public DateTime? Resolved { get; set; }
-        public int? RequestType { get; set; }
-    }
-
     internal sealed class StatisticsGroup
     {
         public string Name { get; set; }
@@ -71,14 +63,22 @@ namespace Certitude
         public long Count(int disposition) => Dispositions.TryGetValue(disposition, out var value) ? value : 0;
 
         internal static CaStatistics Read(string configuration, CancellationToken token, Action<long> progress,
-            OidNames names = null) => Aggregate(ReadRecords(configuration, token, names ?? OidNames.Load(configuration)),
-                DateTime.UtcNow, token, progress);
+            OidNames names = null)
+        {
+            // Stream only the CA columns used in the snapshot, without loading certificate blobs.
+            token.ThrowIfCancellationRequested();
+            names ??= OidNames.Load(configuration);
+            string[] fields = ["RequestID", "CertificateTemplate", "Request.RequesterName", "NotBefore", "NotAfter",
+                "Request.Disposition", "Request.RevokedReason", "Request.SubmittedWhen", "Request.ResolvedWhen",
+                "Request.RequestType"];
+            var records = CaDatabase.Read(configuration, fields, [new DatabaseRestriction("RequestID", 16, 0)], token);
+            return Aggregate(records, names, DateTime.UtcNow, token, progress);
+        }
 
-        internal static CaStatistics Aggregate(IEnumerable<StatisticsRecord> records, DateTime now,
+        internal static CaStatistics Aggregate(IEnumerable<DatabaseRecord> records, OidNames names, DateTime now,
             CancellationToken token, Action<long> progress)
         {
             // Initialize aggregate counters and grouping tables for one consistent snapshot time.
-            token.ThrowIfCancellationRequested();
             var watch = Stopwatch.StartNew();
             var result = new CaStatistics { AsOf = now };
             var templates = new Dictionary<string, StatisticsGroup>(StringComparer.OrdinalIgnoreCase);
@@ -87,49 +87,52 @@ namespace Certitude
             var localMonths = new Dictionary<string, StatisticsGroup>();
             var types = new Dictionary<string, StatisticsGroup>();
             var reasons = new Dictionary<string, StatisticsGroup>();
+            var dueSoon = now.AddDays(30);
             foreach (var record in records)
             {
                 // Count each request disposition and expand the observed request ID range.
                 token.ThrowIfCancellationRequested();
-                var row = record.Certificate;
+                var id = record.Number(0) ?? 0;
+                if (id < 1) throw new InvalidOperationException("The CA returned no request ID.");
+                var disposition = record.Number(5) ?? 0;
+                var notBefore = record.Date(3);
+                var notAfter = record.Date(4);
                 result.Total++;
-                result.Dispositions[row.Disposition] = result.Count(row.Disposition) + 1;
-                result.FirstId = Math.Min(result.FirstId ?? row.RequestId, row.RequestId);
-                result.LastId = Math.Max(result.LastId ?? row.RequestId, row.RequestId);
+                result.Dispositions[disposition] = result.Count(disposition) + 1;
+                result.FirstId = Math.Min(result.FirstId ?? id, id);
+                result.LastId = Math.Max(result.LastId ?? id, id);
 
                 // Classify issued certificates by current validity and upcoming expiration.
-                if (row.Disposition == 20)
+                if (disposition == 20)
                 {
-                    if (!row.NotBefore.HasValue || !row.NotAfter.HasValue) result.MissingValidity++;
-                    if (row.NotAfter <= now) result.Expired++;
-                    else if (row.NotBefore.HasValue && row.NotAfter.HasValue)
+                    if (!notBefore.HasValue || !notAfter.HasValue) result.MissingValidity++;
+                    if (notAfter <= now) result.Expired++;
+                    else if (notBefore.HasValue && notAfter.HasValue)
                     {
-                        if (row.NotBefore > now) result.Future++;
+                        if (notBefore > now) result.Future++;
                         else result.Valid++;
                     }
-                    if (row.NotAfter > now)
+                    if (notAfter > now)
                     {
-                        var days = (row.NotAfter.Value - now).TotalDays;
+                        var days = (notAfter.Value - now).TotalDays;
                         result.Expiry[days <= 7 ? 0 : days <= 30 ? 1 : days <= 60 ? 2 : days <= 90 ? 3 : 4]++;
                     }
                 }
                 // Accumulate validity durations only for issued or revoked certificates with usable dates.
-                if (row.Disposition is 20 or 21 && row.NotAfter >= row.NotBefore &&
-                    row.NotBefore.HasValue && row.NotAfter.HasValue)
+                if (disposition is 20 or 21 && notBefore is DateTime start && notAfter is DateTime end && end >= start)
                 {
                     result.DatedCertificates++;
-                    result.ValidityDays += (row.NotAfter.Value - row.NotBefore.Value).TotalDays;
+                    result.ValidityDays += (end - start).TotalDays;
                 }
                 // Group request activity by template, requester, format, and revocation reason.
-                Add(templates, row.TemplateLabel, row, now);
-                Add(requesters, row.Requester, row, now);
-                Add(types, RequestTypeName(record.RequestType), row, now);
-                if (row.Disposition == 21) Add(reasons, ReasonName(row.RevocationReason), row, now);
-                if (!record.Submitted.HasValue) result.MissingSubmission++;
+                Add(templates, names.Template(Convert.ToString(record.Values[1], CultureInfo.InvariantCulture)).Label);
+                Add(requesters, Convert.ToString(record.Values[2], CultureInfo.InvariantCulture));
+                Add(types, RequestTypeName(record.Number(9)));
+                if (disposition == 21) Add(reasons, ReasonName(record.Number(6)));
+                if (record.Date(7) is not DateTime submitted) result.MissingSubmission++;
                 else
                 {
                     // Track submission bounds, recent activity, and the oldest pending request.
-                    var submitted = record.Submitted.Value;
                     if (!result.FirstSubmission.HasValue || submitted < result.FirstSubmission)
                         result.FirstSubmission = submitted;
                     if (!result.LastSubmission.HasValue || submitted > result.LastSubmission)
@@ -142,22 +145,36 @@ namespace Certitude
                         if (age <= 30) result.Recent[2]++;
                     }
                     // Group submissions by month and retain the age of the pending backlog.
-                    if (row.Disposition == 9 && (!result.OldestPending.HasValue || submitted < result.OldestPending))
+                    if (disposition == 9 && (!result.OldestPending.HasValue || submitted < result.OldestPending))
                         result.OldestPending = submitted;
-                    Add(months, submitted.ToString("yyyy-MM", CultureInfo.InvariantCulture), row, now);
+                    Add(months, submitted.ToString("yyyy-MM", CultureInfo.InvariantCulture));
                     Add(localMonths, TimeDisplay.Display(submitted, false).ToString("yyyy-MM",
-                        CultureInfo.InvariantCulture), row, now);
+                        CultureInfo.InvariantCulture));
 
                     // Measure resolution time only for completed requests with consistent timestamps.
-                    if (row.Disposition is not (8 or 9) && record.Resolved >= submitted)
+                    if (disposition is not (8 or 9) && record.Date(8) is DateTime resolved && resolved >= submitted)
                     {
-                        var seconds = (record.Resolved.Value - submitted).TotalSeconds;
+                        var seconds = (resolved - submitted).TotalSeconds;
                         result.TimedResolutions++;
                         result.ResolutionSeconds += seconds;
                         result.LongestResolutionSeconds = Math.Max(result.LongestResolutionSeconds, seconds);
                     }
                 }
                 if (result.Total % 4096 == 0) progress?.Invoke(result.Total);
+
+                void Add(Dictionary<string, StatisticsGroup> groups, string name)
+                {
+                    // Update one grouping bucket with disposition and expiry counts.
+                    name = string.IsNullOrWhiteSpace(name) ? "(Not Recorded)" : name;
+                    if (!groups.TryGetValue(name, out var group))
+                        groups.Add(name, group = new StatisticsGroup { Name = name });
+                    group.Count++;
+                    if (disposition == 21) group.Revoked++;
+                    if (disposition != 20) return;
+                    group.Issued++;
+                    if (notAfter <= now) group.Expired++;
+                    else if (notAfter <= dueSoon) group.DueSoon++;
+                }
             }
             // Rank the completed groups and calculate their shares of the relevant totals.
             token.ThrowIfCancellationRequested();
@@ -176,20 +193,6 @@ namespace Certitude
             token.ThrowIfCancellationRequested();
             result.Elapsed = watch.Elapsed;
             return result;
-        }
-
-        private static void Add(Dictionary<string, StatisticsGroup> groups, string name,
-            CertificateRow row, DateTime now)
-        {
-            // Update one grouping bucket with disposition and expiry counts.
-            name = string.IsNullOrWhiteSpace(name) ? "(Not Recorded)" : name;
-            if (!groups.TryGetValue(name, out var group)) groups.Add(name, group = new StatisticsGroup { Name = name });
-            group.Count++;
-            if (row.Disposition == 21) group.Revoked++;
-            if (row.Disposition != 20) return;
-            group.Issued++;
-            if (row.NotAfter <= now) group.Expired++;
-            else if (row.NotAfter <= now.AddDays(30)) group.DueSoon++;
         }
 
         private static StatisticsGroup[] Ranked(Dictionary<string, StatisticsGroup> groups, long total,
@@ -214,56 +217,16 @@ namespace Certitude
             };
         }
 
-        private static string ReasonName(int? reason)
-        {
-            // Map recorded revocation reasons while retaining unknown numeric values.
-            var names = new[] { "Unspecified", "Key Compromise", "CA Compromise", "Affiliation Changed",
-                "Superseded", "Cessation Of Operation", "Certificate Hold", "Unused", "Remove From CRL",
-                "Privilege Withdrawn", "AA Compromise" };
-            return !reason.HasValue ? "(Not Recorded)" : reason >= 0 && reason < names.Length ?
-                names[reason.Value] : "Other (" + reason + ")";
-        }
+        private static readonly string[] reasonNames =
+        [
+            "Unspecified", "Key Compromise", "CA Compromise", "Affiliation Changed",
+            "Superseded", "Cessation Of Operation", "Certificate Hold", "Unused", "Remove From CRL",
+            "Privilege Withdrawn", "AA Compromise"
+        ];
 
-        private static IEnumerable<StatisticsRecord> ReadRecords(string configuration, CancellationToken token, OidNames oids)
-        {
-            // Stream the statistics projection in bounded metadata batches without fetching certificate blobs.
-            var names = new[] { "RequestID", "CertificateTemplate", "Request.RequesterName", "NotBefore", "NotAfter",
-                "Request.Disposition", "Request.RevokedReason", "Request.SubmittedWhen", "Request.ResolvedWhen",
-                "Request.RequestType" };
-            var restrictions = new[] { new DatabaseRestriction("RequestID", 16, 0) };
-            foreach (var data in CaDatabase.Read(configuration, names, restrictions, token))
-            {
-                var row = new CertificateRow();
-                var record = new StatisticsRecord { Certificate = row };
-                for (var ordinal = 0; ordinal < data.Values.Length; ordinal++)
-                {
-                    var value = data.Values[ordinal];
-                    if (value == null || value == DBNull.Value) continue;
-                    var date = value is DateTime time ? (DateTime?)DateTime.SpecifyKind(time, DateTimeKind.Utc) : null;
-
-                    // Retain the exact aggregate inputs and resolved template identities from the CA.
-                    switch (ordinal)
-                    {
-                        case 0: row.RequestId = Convert.ToInt32(value); break;
-                        case 1:
-                            row.Template = Convert.ToString(value);
-                            row.ResolvedTemplate = oids.Template(row.Template);
-                            break;
-                        case 2: row.Requester = Convert.ToString(value); break;
-                        case 3: row.NotBefore = date; break;
-                        case 4: row.NotAfter = date; break;
-                        case 5: row.Disposition = Convert.ToInt32(value); break;
-                        case 6: row.RevocationReason = Convert.ToInt32(value); break;
-                        case 7: record.Submitted = date; break;
-                        case 8: record.Resolved = date; break;
-                        case 9: record.RequestType = Convert.ToInt32(value); break;
-                    }
-                }
-                if (row.RequestId < 1) throw new InvalidOperationException("The CA returned no request ID.");
-                token.ThrowIfCancellationRequested();
-                yield return record;
-            }
-        }
+        // Map recorded revocation reasons while retaining unknown numeric values.
+        private static string ReasonName(int? reason) => !reason.HasValue ? "(Not Recorded)" :
+            reason >= 0 && reason < reasonNames.Length ? reasonNames[reason.Value] : "Other (" + reason + ")";
     }
 
     internal sealed class StatisticsFile
@@ -295,31 +258,26 @@ namespace Certitude
             Add(result.Server, "Target Server", host);
 
             // Read supported CA properties without letting one unavailable value stop the report.
-            Attempt(result.Authority, "CA Properties", token, () => CaAdministration.Use(config, admin =>
-            {
-                result.ReadAuthorityProperties(config, admin, token);
-                return true;
-            }));
+            Attempt(result.Authority, "CA Properties", token, () => CaAdministration.Use(admin =>
+                result.ReadAuthorityProperties(config, admin, token)));
 
             // Describe the current CA signing certificate, validity period, and key.
             Attempt(result.Authority, "Current Signing Certificate", token, () =>
             {
-                using (var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request"))
-                using (var certificate = new X509Certificate2(Convert.FromBase64String(
-                    request.Value.GetCACertificate(0, config, 1))))
-                {
-                    var described = CertificateUtilities.Describe(certificate, names);
-                    Add(result.Authority, "Signing Certificate Subject", certificate.Subject);
-                    Add(result.Authority, "Signing Certificate Issuer", certificate.Issuer);
-                    Add(result.Authority, "Signing Certificate Thumbprint", certificate.Thumbprint);
-                    Add(result.Authority, "Signing Certificate Valid From (UTC)",
-                        certificate.NotBefore.ToUniversalTime());
-                    Add(result.Authority, "Signing Certificate Expires (UTC)",
-                        certificate.NotAfter.ToUniversalTime());
-                    Add(result.Authority, "Signing Certificate Key",
-                        described.Algorithm + " / " + described.KeyBits + " Bits");
-                    Add(result.Authority, "Signing Certificate Size", Size(certificate.RawData.Length));
-                }
+                using var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request");
+                using var certificate = new X509Certificate2(Convert.FromBase64String(
+                    request.Value.GetCACertificate(0, config, 1)));
+                var described = CertificateUtilities.Describe(certificate, names);
+                Add(result.Authority, "Signing Certificate Subject", certificate.Subject);
+                Add(result.Authority, "Signing Certificate Issuer", certificate.Issuer);
+                Add(result.Authority, "Signing Certificate Thumbprint", certificate.Thumbprint);
+                Add(result.Authority, "Signing Certificate Valid From (UTC)",
+                    certificate.NotBefore.ToUniversalTime());
+                Add(result.Authority, "Signing Certificate Expires (UTC)",
+                    certificate.NotAfter.ToUniversalTime());
+                Add(result.Authority, "Signing Certificate Key",
+                    described.Algorithm + " / " + described.KeyBits + " Bits");
+                Add(result.Authority, "Signing Certificate Size", Size(certificate.RawData.Length));
             });
 
             // Connect to server WMI for operating system, service, and storage metrics.
@@ -428,101 +386,97 @@ namespace Certitude
                 Add(result.Storage, "File Size Collection", local ? "Local File Metadata" : "Remote WMI File Metadata");
                 var registryScope = new ManagementScope(@"\\" + host + @"\root\default",
                     new ConnectionOptions { Timeout = Timeout });
-                using (var registry = new ManagementClass(registryScope, new ManagementPath("StdRegProv"), null))
+                using var registry = new ManagementClass(registryScope, new ManagementPath("StdRegProv"), null);
+                // Group configured storage roles by folder to avoid duplicate file scans.
+                var folders = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                var entries = new[] { "DBDirectory", "DBLogDirectory", "DBSystemDirectory", "DBTempDirectory" };
+                var labels = new[] { "Database Directory", "Log Directory", "System Directory", "Temporary Directory" };
+                for (var i = 0; i < entries.Length; i++)
                 {
-                    // Group configured storage roles by folder to avoid duplicate file scans.
-                    var folders = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-                    var entries = new[] { "DBDirectory", "DBLogDirectory", "DBSystemDirectory", "DBTempDirectory" };
-                    var labels = new[] { "Database Directory", "Log Directory", "System Directory", "Temporary Directory" };
-                    for (var i = 0; i < entries.Length; i++)
+                    var name = entries[i];
+                    var label = labels[i];
+                    Attempt(result.Storage, label, token, () =>
                     {
-                        var name = entries[i];
-                        var label = labels[i];
-                        Attempt(result.Storage, label, token, () =>
+                        // Read the configured path and expand environment variables on the server.
+                        string path;
+                        using (var input = registry.GetMethodParameters("GetStringValue"))
                         {
-                            // Read the configured path and expand environment variables on the server.
-                            string path;
-                            using (var input = registry.GetMethodParameters("GetStringValue"))
+                            input["hDefKey"] = 0x80000002u;
+                            input["sSubKeyName"] = @"SYSTEM\CurrentControlSet\Services\CertSvc\Configuration";
+                            input["sValueName"] = name;
+                            using (var output = registry.InvokeMethod("GetStringValue", input,
+                                new InvokeMethodOptions { Timeout = Timeout }))
+                                path = Convert.ToString(output["sValue"]);
+                            if (string.IsNullOrEmpty(path) || path.Contains("%"))
                             {
-                                input["hDefKey"] = 0x80000002u;
-                                input["sSubKeyName"] = @"SYSTEM\CurrentControlSet\Services\CertSvc\Configuration";
-                                input["sValueName"] = name;
-                                using (var output = registry.InvokeMethod("GetStringValue", input,
-                                    new InvokeMethodOptions { Timeout = Timeout }))
-                                    path = Convert.ToString(output["sValue"]);
-                                if (string.IsNullOrEmpty(path) || path.Contains("%"))
-                                {
-                                    using (var output = registry.InvokeMethod("GetExpandedStringValue", input,
-                                        new InvokeMethodOptions { Timeout = Timeout }))
-                                    {
-                                        var error = Convert.ToInt32(output["ReturnValue"]);
-                                        if (error != 0) throw new Win32Exception(error);
-                                        path = Convert.ToString(output["sValue"]);
-                                    }
-                                }
+                                using var output = registry.InvokeMethod("GetExpandedStringValue", input,
+                                    new InvokeMethodOptions { Timeout = Timeout });
+                                var error = Convert.ToInt32(output["ReturnValue"]);
+                                if (error != 0) throw new Win32Exception(error);
+                                path = Convert.ToString(output["sValue"]);
                             }
-                            // Require an absolute server path before associating it with storage roles.
-                            if (string.IsNullOrWhiteSpace(path) || path.Contains("%") ||
-                                path.Length < 3 || path[1] != ':')
-                                throw new InvalidOperationException(
-                                    "The Server Did Not Return An Absolute Local Folder.");
-                            path = path.TrimEnd('\\');
-                            Add(result.Storage, label, path);
-                            if (!folders.TryGetValue(path, out var roles))
-                                folders.Add(path, roles = new List<string>());
-                            roles.Add(name);
-                        });
-                    }
-                    // Inspect each distinct configured folder while isolating access failures.
-                    foreach (var folder in folders)
-                    {
-                        Attempt(result.Storage, "Files In " + folder.Key, token, () =>
-                        {
-                            var files = new List<StatisticsFile>();
-                            var drive = folder.Key.Substring(0, 2);
-                            var path = folder.Key.Substring(2) + "\\";
-                            void AddFile(string name, long bytes)
-                            {
-                                // Classify files by extension and the configured role of their folder.
-                                token.ThrowIfCancellationRequested();
-                                var extension = Path.GetExtension(name).ToLowerInvariant();
-                                var kind = extension == ".edb" && folder.Value.Contains("DBDirectory") ? "Database" :
-                                    extension == ".log" && folder.Value.Contains("DBLogDirectory") ? "Transaction Log" :
-                                    extension == ".jrs" && folder.Value.Contains("DBLogDirectory") ? "Reserve Log" :
-                                    extension == ".chk" ? "Checkpoint" : "Other";
-                                files.Add(new StatisticsFile { Path = name, Kind = kind, Bytes = bytes });
-                            }
-                            // Use local file metadata or targeted WMI queries according to the CA host.
-                            if (local)
-                            {
-                                foreach (var file in new DirectoryInfo(folder.Key + "\\").EnumerateFiles())
-                                    AddFile(file.FullName, file.Length);
-                            }
-                            else Query(scope, "SELECT Name, FileSize FROM CIM_DataFile WHERE Drive='" +
-                                Wql(drive) + "' AND Path='" + Wql(path) + "'", token, item =>
-                            {
-                                if (item["FileSize"] == null) throw new IOException("A File Size Was Not Available.");
-                                AddFile(Convert.ToString(item["Name"]), Convert.ToInt64(item["FileSize"]));
-                            });
-
-                            // Record folder totals and retain database size for the summary.
-                            result.Files.AddRange(files);
-                            Add(result.Storage, "Files In " + folder.Key,
-                                $"{files.Count:N0} / " + Size(files.Sum(file => file.Bytes)));
-                            if (folder.Value.Contains("DBDirectory"))
-                            {
-                                var databases = files.Where(file => file.Kind == "Database").ToArray();
-                                if (databases.Length > 0) result.DatabaseBytes = databases.Sum(file => file.Bytes);
-                            }
-                        });
-                    }
-                    // Summarize database size and file counts for each storage category.
-                    Add(result.Storage, "Database Files (*.edb)", result.DatabaseBytes.HasValue ?
-                        Size(result.DatabaseBytes.Value) : "Unavailable — No Database File Sizes Were Read.");
-                    foreach (var group in result.Files.GroupBy(file => file.Kind))
-                        Add(result.Storage, group.Key + " Files",
-                            $"{group.Count():N0} / " + Size(group.Sum(file => file.Bytes)));
+                        }
+                        // Require an absolute server path before associating it with storage roles.
+                        if (string.IsNullOrWhiteSpace(path) || path.Contains("%") ||
+                            path.Length < 3 || path[1] != ':')
+                            throw new InvalidOperationException(
+                                "The Server Did Not Return An Absolute Local Folder.");
+                        path = path.TrimEnd('\\');
+                        Add(result.Storage, label, path);
+                        if (!folders.TryGetValue(path, out var roles))
+                            folders.Add(path, roles = new List<string>());
+                        roles.Add(name);
+                    });
                 }
+                // Inspect each distinct configured folder while isolating access failures.
+                foreach (var folder in folders)
+                {
+                    Attempt(result.Storage, "Files In " + folder.Key, token, () =>
+                    {
+                        var files = new List<StatisticsFile>();
+                        var drive = folder.Key.Substring(0, 2);
+                        var path = folder.Key.Substring(2) + "\\";
+                        void AddFile(string name, long bytes)
+                        {
+                            // Classify files by extension and the configured role of their folder.
+                            token.ThrowIfCancellationRequested();
+                            var extension = Path.GetExtension(name).ToLowerInvariant();
+                            var kind = extension == ".edb" && folder.Value.Contains("DBDirectory") ? "Database" :
+                                extension == ".log" && folder.Value.Contains("DBLogDirectory") ? "Transaction Log" :
+                                extension == ".jrs" && folder.Value.Contains("DBLogDirectory") ? "Reserve Log" :
+                                extension == ".chk" ? "Checkpoint" : "Other";
+                            files.Add(new StatisticsFile { Path = name, Kind = kind, Bytes = bytes });
+                        }
+                        // Use local file metadata or targeted WMI queries according to the CA host.
+                        if (local)
+                        {
+                            foreach (var file in new DirectoryInfo(folder.Key + "\\").EnumerateFiles())
+                                AddFile(file.FullName, file.Length);
+                        }
+                        else Query(scope, "SELECT Name, FileSize FROM CIM_DataFile WHERE Drive='" +
+                            Wql(drive) + "' AND Path='" + Wql(path) + "'", token, item =>
+                        {
+                            if (item["FileSize"] == null) throw new IOException("A File Size Was Not Available.");
+                            AddFile(Convert.ToString(item["Name"]), Convert.ToInt64(item["FileSize"]));
+                        });
+
+                        // Record folder totals and retain database size for the summary.
+                        result.Files.AddRange(files);
+                        Add(result.Storage, "Files In " + folder.Key,
+                            $"{files.Count:N0} / " + Size(files.Sum(file => file.Bytes)));
+                        if (folder.Value.Contains("DBDirectory"))
+                        {
+                            var databases = files.Where(file => file.Kind == "Database").ToArray();
+                            if (databases.Length > 0) result.DatabaseBytes = databases.Sum(file => file.Bytes);
+                        }
+                    });
+                }
+                // Summarize database size and file counts for each storage category.
+                Add(result.Storage, "Database Files (*.edb)", result.DatabaseBytes.HasValue ?
+                    Size(result.DatabaseBytes.Value) : "Unavailable — No Database File Sizes Were Read.");
+                foreach (var group in result.Files.GroupBy(file => file.Kind))
+                    Add(result.Storage, group.Key + " Files",
+                        $"{group.Count():N0} / " + Size(group.Sum(file => file.Bytes)));
             });
         }
 
@@ -531,18 +485,16 @@ namespace Certitude
         {
             // Run a bounded forward-only WMI query with cancellation between results.
             token.ThrowIfCancellationRequested();
-            using (var search = new ManagementObjectSearcher(scope, new ObjectQuery(query),
-                new EnumerationOptions { ReturnImmediately = true, Rewindable = false, Timeout = Timeout }))
-            using (var results = search.Get())
+            using var search = new ManagementObjectSearcher(scope, new ObjectQuery(query),
+                new EnumerationOptions { ReturnImmediately = true, Rewindable = false, Timeout = Timeout });
+            using var results = search.Get();
+            var count = 0;
+            foreach (ManagementBaseObject item in results)
             {
-                var count = 0;
-                foreach (ManagementBaseObject item in results)
-                {
-                    using (item) { token.ThrowIfCancellationRequested(); read(item); count++; }
-                }
-                if (count == 0 && !query.Contains("CIM_DataFile"))
-                    throw new InvalidOperationException("The Server Returned No Data.");
+                using (item) { token.ThrowIfCancellationRequested(); read(item); count++; }
             }
+            if (count == 0 && !query.Contains("CIM_DataFile"))
+                throw new InvalidOperationException("The Server Returned No Data.");
         }
 
         private static void Attempt(List<DetailValue> values, string label, CancellationToken token, Action read)
@@ -558,7 +510,6 @@ namespace Certitude
             values.Add(new DetailValue { Name = name, Value = value == null ? "Not Recorded" : CertificateStore.Format(value),
                 Time = value is DateTime date ? TimeDisplay.Utc(date) : (DateTime?)null, Report = value as TimeReport });
 
-        internal static string Date(DateTime? date) => TimeDisplay.Stamp(date);
         internal static string Size(long bytes) => bytes >= 1073741824 ?
             $"{bytes / 1073741824.0:N2} GiB ({bytes:N0} Bytes)" :
             bytes >= 1048576 ? $"{bytes / 1048576.0:N2} MiB ({bytes:N0} Bytes)" : $"{bytes:N0} Bytes";

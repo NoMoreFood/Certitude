@@ -48,6 +48,8 @@ namespace Certitude
                 foreach (XmlElement element in document.DocumentElement.ChildNodes)
                     fixtures.Add(element.Name, Convert.FromBase64String(element.InnerText));
                 CheckOfflineMaintenance();
+                CheckAuthorityActions();
+                CheckStatistics();
                 CheckRenewedCrlKeys();
                 CheckRevocations();
                 var entries = CheckHealth();
@@ -83,6 +85,84 @@ namespace Certitude
 
             using (CaMaintenance.BeginOfflineMaintenance(mutexName)) Probe(true);
             Probe(false);
+        }
+
+        private static void CheckAuthorityActions()
+        {
+            // Retain per-CA results and attempt each distinct authority even when individual calls fail.
+            var calls = new List<string>();
+            string Run(IEnumerable<string> names, Func<string, TimeReport> action, CancellationToken token = default)
+            {
+                calls.Clear();
+                return CaAdministration.RunAuthorities(names, target =>
+                {
+                    calls.Add(target);
+                    return action(target);
+                }, token, null).ToString();
+            }
+            var report = Run(targets.Concat([targets[0].ToUpperInvariant()]), target => target == targets[1] ?
+                throw new IOException("Access denied") : new TimeReport("Published on " + target));
+            Assert(calls.SequenceEqual(targets) && targets.All(target => report.Contains("CA: " + target)) &&
+                report.Contains("Access denied") && report.Contains("1 calls failed; 0 not attempted.") &&
+                report.Contains("Published on " + targets[0]) && report.Contains("Published on " + targets[2]),
+                "A failed or duplicate target changed the batch results.");
+            report = Run(targets, target => throw new IOException("Offline"));
+            Assert(calls.SequenceEqual(targets) && report.Contains("3 calls failed; 0 not attempted."),
+                "Every offline authority must appear in the failure count.");
+
+            // Cancellation preserves completed changes and leaves all remaining targets untouched.
+            using var cancellation = new CancellationTokenSource();
+            report = Run(targets, target => { cancellation.Cancel(); return new TimeReport("Published"); },
+                cancellation.Token);
+            Assert(calls.SequenceEqual(targets.Take(1)) && report.Contains("Published") &&
+                report.Contains("2 not attempted.") && report.Contains("Completed CA changes remain applied"),
+                "Cancellation lost the completed result or contacted another authority.");
+            report = Run(targets, target => new TimeReport(), cancellation.Token);
+            Assert(calls.Count == 0 && report.Contains("3 not attempted."), "A pre-cancelled batch contacted a CA.");
+            foreach (var invalid in new string[][] { [targets[0], "All CAs"], [] })
+            {
+                Reject<ArgumentException>(() => Run(invalid, target => new TimeReport()),
+                    "Invalid targets were accepted.");
+                Assert(calls.Count == 0, "A CA was contacted before the whole target list was validated.");
+            }
+
+            // A failed certificate query must leave its authority available for administrative actions.
+            var stores = targets.Select(name => new FixtureStore(name, [new CertificateRow
+                { RequestId = 1, Disposition = 20 }])).ToArray();
+            stores[1].FailAfter = 0;
+            var all = new AllCertificateStore(stores);
+            var page = all.ReadBrowserPage(new QuerySpec(), null, CancellationToken.None);
+            Assert(page.Rows.Count == 2 && all.UnavailableCount == 1 &&
+                new HashSet<string>(all.Configurations).SetEquals(targets),
+                "A failed query hid an administrative target.");
+        }
+
+        private static void CheckStatistics()
+        {
+            // Verify the CA projection with absent values, mixed dispositions and dates on bucket boundaries.
+            var now = new DateTime(2026, 1, 31, 12, 0, 0, DateTimeKind.Utc);
+            DatabaseRecord[] rows =
+            [
+                new([4, "Web", "Alice", now.AddDays(-2), now.AddDays(7), 20, null, now.AddDays(-1), now, 0x100]),
+                new([1, "web", "ALICE", null, now, 20, DBNull.Value, DBNull.Value, null, DBNull.Value]),
+                new([3, null, null, null, null, 9, null, now.AddDays(-7), null, null]),
+                new([2, "Mail", "Bob", now.AddDays(-1), now.AddDays(1), 21, 6, now.AddDays(-2), now.AddDays(-3), 0])
+            ];
+            var snapshot = CaStatistics.Aggregate(rows, OidNames.Windows, now, CancellationToken.None, null);
+            Assert(snapshot.Total == 4 && snapshot.FirstId == 1 && snapshot.LastId == 4 &&
+                snapshot.Valid == 1 && snapshot.Expired == 1 && snapshot.MissingValidity == 1 &&
+                snapshot.Expiry.SequenceEqual([1L, 0, 0, 0, 0]) && snapshot.OldestPending == now.AddDays(-7) &&
+                snapshot.Recent.SequenceEqual([1L, 3, 3]) && snapshot.MissingSubmission == 1 &&
+                snapshot.TimedResolutions == 1 && snapshot.ResolutionSeconds == 86400 &&
+                snapshot.DatedCertificates == 2 && snapshot.ValidityDays == 11, "CA statistics lost dates or counts.");
+            Assert(snapshot.Templates[0].Count == 2 && snapshot.Templates[0].DueSoon == 1 &&
+                snapshot.Templates[0].Expired == 1 && snapshot.Requesters[0].Count == 2 &&
+                snapshot.Reasons.Single().Name == "Certificate Hold" &&
+                snapshot.Types.Any(group => group.Name == "PKCS #10"),
+                "CA statistics lost group membership or reasons.");
+            rows[0].Values[0] = DBNull.Value;
+            Reject<InvalidOperationException>(() => CaStatistics.Aggregate(rows, OidNames.Windows, now, default, null),
+                "A missing request ID was accepted into a snapshot.");
         }
 
         private static void CheckRenewedCrlKeys()
@@ -273,8 +353,7 @@ namespace Certitude
                 typeof(MainWindow).GetMethod("WindowLoaded", Private));
             var preference = (BrowserWorkspace)Field(window, "savedWorkspace");
             preference.PromptForCrlPublication = true;
-            var offer = (Task)typeof(MainWindow).GetMethod("OfferCrlPublication", Private)
-                .Invoke(window, new object[] { new[] { targets[0] } });
+            var offer = (Task)Call(window, "OfferCrlPublication", (object)new[] { targets[0] });
             Render(window, Path.Combine(output, "publication-prompt.png"), 1);
             var suppress = Children(window.ActivePage).OfType<CheckBox>().Single();
             suppress.IsChecked = true;
@@ -284,16 +363,15 @@ namespace Certitude
                 "Don't show again must persist even when publication is declined.");
 
             // The preferences control re-enables the offer, and review opens only the confirmed affected targets.
-            typeof(MainWindow).GetMethod("ManageViewsClick", Private).Invoke(window, new object[] { null, null });
+            Call(window, "ManageViewsClick", null, null);
             var manager = (TabControl)window.ActivePage.Content;
             manager.SelectedIndex = 2;
             var toggle = Children(manager).OfType<CheckBox>().Single();
             toggle.IsChecked = true;
             toggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert(BrowserWorkspace.Load(path).PromptForCrlPublication, "The reminder must be re-enableable.");
-            typeof(MainWindow).GetMethod("ReturnToBrowser", Private).Invoke(window, null);
-            offer = (Task)typeof(MainWindow).GetMethod("OfferCrlPublication", Private)
-                .Invoke(window, new object[] { new[] { targets[0], targets[2] } });
+            Call(window, "ReturnToBrowser");
+            offer = (Task)Call(window, "OfferCrlPublication", (object)new[] { targets[0], targets[2] });
             Click(window.ActivePage, "_Review Publication…");
             Complete(offer);
             Assert(((string[])Field(window.ActivePage, "configurations"))
@@ -303,7 +381,6 @@ namespace Certitude
 
             // Render the actual health controls with mixed results at normal and enlarged display scaling.
             var page = new CrlHealthPage(new AllCertificateStore(targets.Select(value => new CertificateStore(value))));
-            typeof(CrlHealthPage).GetField("initialized", Private).SetValue(page, true);
             var rows = (System.Collections.ObjectModel.ObservableCollection<CrlHealthEntry>)Field(page, "entries");
             foreach (var entry in entries) rows.Add(entry);
             ((DataGrid)Field(page, "grid")).SelectedIndex = 0;
@@ -320,6 +397,11 @@ namespace Certitude
 
         private static object Field(object value, string name) =>
             value.GetType().GetField(name, Private).GetValue(value);
+        private static void SetField(object target, string name, object value) =>
+            target.GetType().GetField(name, Private).SetValue(target, value);
+        private static object Call(object target, string name, params object[] arguments) =>
+            target.GetType().GetMethod(name, Private).Invoke(target, arguments);
+
         private static IEnumerable<DependencyObject> Children(DependencyObject root)
         {
             yield return root;

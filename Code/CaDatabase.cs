@@ -26,6 +26,12 @@ namespace Certitude
     {
         internal object[] Values { get; } = values;
         internal ICertViewRow NativeRow { get; } = nativeRow;
+
+        // CA date columns contain UTC clock values on both database transports.
+        internal DateTime? Date(int ordinal) => Values[ordinal] is DateTime date ?
+            DateTime.SpecifyKind(date, DateTimeKind.Utc) : null;
+        internal int? Number(int ordinal) => Values[ordinal] is null or DBNull ? null :
+            Convert.ToInt32(Values[ordinal], CultureInfo.InvariantCulture);
     }
 
     internal static class CaDatabase
@@ -147,16 +153,10 @@ namespace Certitude
                         status = !opened ? scope.Value.OpenView(authority, bounds.Length, bounds, indexes.Length,
                             indexes, position, requested, out fetched, out blob) :
                             scope.Value.EnumView(authority, position, requested, out fetched, out blob);
-                    byte[] data;
-                    try
-                    {
-                        Marshal.ThrowExceptionForHR(status);
-                        opened = true;
-                        if (fetched < 0 || fetched > requested) throw new InvalidDataException(InvalidResponse);
-                        data = CopyBlob(blob);
-                        activity?.Response(fetched);
-                    }
-                    finally { Marshal.FreeCoTaskMem(blob.Data); }
+                    // A successful open must be closed even if its first response is malformed.
+                    if (status >= 0) opened = true;
+                    var data = ReadBlob(status, blob, fetched, requested);
+                    activity?.Response(fetched);
                     token.ThrowIfCancellationRequested();
                     var offset = 0;
                     for (var index = 0; index < fetched; index++)
@@ -232,15 +232,8 @@ namespace Certitude
                 CaBlob blob;
                 using (activity?.BeginCall("Preparing search"))
                     status = connection.EnumViewColumn(authority, first, 128, out fetched, out blob);
-                byte[] data;
-                try
-                {
-                    Marshal.ThrowExceptionForHR(status);
-                    if (fetched < 0 || fetched > 128) throw new InvalidDataException(InvalidResponse);
-                    data = CopyBlob(blob);
-                    activity?.Response();
-                }
-                finally { Marshal.FreeCoTaskMem(blob.Data); }
+                var data = ReadBlob(status, blob, fetched, 128);
+                activity?.Response();
                 if (data.Length < fetched * 20) throw new InvalidDataException(InvalidResponse);
                 for (var index = 0; index < fetched; index++)
                 {
@@ -258,14 +251,19 @@ namespace Certitude
             }
         }
 
-        private static byte[] CopyBlob(CaBlob blob)
+        private static byte[] ReadBlob(int status, CaBlob blob, int fetched, int requested)
         {
-            // Reject impossible native buffers before copying into bounded managed storage.
-            if (blob.Length < 0 || blob.Length > 64 * 1024 * 1024 ||
-                (blob.Length > 0 && blob.Data == IntPtr.Zero)) throw new InvalidDataException(InvalidResponse);
-            var data = new byte[blob.Length];
-            if (data.Length > 0) Marshal.Copy(blob.Data, data, 0, data.Length);
-            return data;
+            // Release the native response even when the call fails or its reported extents are invalid.
+            try
+            {
+                Marshal.ThrowExceptionForHR(status);
+                if (fetched < 0 || fetched > requested || blob.Length < 0 || blob.Length > 64 * 1024 * 1024 ||
+                    (blob.Length > 0 && blob.Data == IntPtr.Zero)) throw new InvalidDataException(InvalidResponse);
+                var data = new byte[blob.Length];
+                if (data.Length > 0) Marshal.Copy(blob.Data, data, 0, data.Length);
+                return data;
+            }
+            finally { Marshal.FreeCoTaskMem(blob.Data); }
         }
 
         private static IEnumerable<DatabaseRecord> ReadNative(string configuration, string[] fields,

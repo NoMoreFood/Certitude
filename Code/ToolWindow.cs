@@ -91,22 +91,11 @@ namespace Certitude
             });
             cancel.IsEnabled = false;
             cancel.Visibility = allAuthorities ? Visibility.Visible : Visibility.Collapsed;
-            Dialogs.Button(controls, "_Save Visible Output", async () =>
-            {
-                // Save the visible maintenance output to the selected text file.
-                var save = new FilePicker(true) { FileName = "Certitude-maintenance.txt", Filter = "Text|*.txt" };
-                if (await save.ShowAsync() != true) return;
-                try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(output.Text)); }
-                catch (Exception error) { status.Text = CaAdministration.Error(error); }
-            });
+            Dialogs.Button(controls, "_Save Visible Output", async () => await Dialogs.SaveFile(this,
+                "Certitude-maintenance.txt", "Text|*.txt", _ => Encoding.UTF8.GetBytes(output.Text), status));
 
             // Provide a scrolling console-style output area for maintenance results.
-            output = new TextBox
-            {
-                IsReadOnly = true, AcceptsReturn = true, VerticalContentAlignment = VerticalAlignment.Top,
-                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
-            };
+            output = Dialogs.OutputBox(monospace: true);
             layout.Children.Add(output);
             Content = layout;
             Dialogs.ScrollHeader(layout, editor);

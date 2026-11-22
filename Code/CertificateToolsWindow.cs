@@ -38,7 +38,7 @@ namespace Certitude
             ItemsSource = new[] { "Any Key Status", "Has Private Key", "No Private Key" } };
         private readonly DataGrid inventory = new DataGrid { SelectionMode = DataGridSelectionMode.Extended };
         private readonly WrapPanel inventoryActions = new WrapPanel();
-        private readonly TextBox details = Output();
+        private readonly TextBox details = Dialogs.OutputBox(monospace: true);
         private readonly TextBlock source = new TextBlock { TextWrapping = TextWrapping.Wrap };
         private readonly TextBlock counts = new TextBlock
             { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 4) };
@@ -113,34 +113,20 @@ namespace Certitude
 
             // Explain the available tools and load the initial Windows store once.
             status.Text = "Load a Windows store, open a certificate file, check a TLS endpoint, or create a request.";
-            var firstLoad = true;
-            Loaded += async (sender, e) =>
-            {
-                if (!firstLoad) return;
-                firstLoad = false;
-                await Reload();
-            };
+            OnFirstLoad(Reload);
         }
 
-        private DockPanel Page(string title, out StackPanel header)
+        private DockPanel Page(string title, FrameworkElement content)
         {
             // Create a tool tab with a consistent header area and glyph.
             var page = new DockPanel { Margin = new Thickness(6) };
-            header = new StackPanel();
-            DockPanel.SetDock(header, Dock.Top);
-            page.Children.Add(header);
+            DockPanel.SetDock(content, Dock.Top);
+            page.Children.Add(content);
             var tab = new TabItem { Header = Dialogs.Caption(title), Content = page };
             Glyphs.SetIcon(tab, Glyphs.ForCaption(title));
             tabs.Items.Add(tab);
             return page;
         }
-
-        private static TextBox Output() => new TextBox
-        {
-            IsReadOnly = true, AcceptsReturn = true, VerticalContentAlignment = VerticalAlignment.Top,
-            FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
-        };
 
         private static void Label(Panel panel, string label, FrameworkElement control)
         {
@@ -169,44 +155,42 @@ namespace Certitude
             // Serialize tool operations and expose a shared cancellation control.
             if (cancellation != null) return;
             using var cursor = BusyCursor.Enter();
-            using (var request = new CancellationTokenSource())
+            using var request = new CancellationTokenSource();
+            cancellation = request;
+            tabs.IsEnabled = false;
+            cancel.IsEnabled = true;
+            status.Text = message;
+            UpdateContextMenu();
+            try
             {
-                cancellation = request;
-                tabs.IsEnabled = false;
-                cancel.IsEnabled = true;
-                status.Text = message;
+                // Refresh OID names before running the operation and append resolution status.
+                oids = await Task.Run(() => oidNames.Value.Refresh(), request.Token);
+                request.Token.ThrowIfCancellationRequested();
+                await operation(request.Token);
+                status.Text += " · " + oids.Status;
+            }
+            catch (OperationCanceledException)
+            {
+                status.Text = "Cancelled. Completed key/store/CA changes remain applied; review before retrying.";
+            }
+            catch (Exception error)
+            {
+                // Display the complete failure in the active tool and a concise status message.
+                var messageText = CaAdministration.Error(error);
+                status.Text = messageText.Replace("\r", "").Split('\n')[0];
+                var output = tabs.SelectedIndex switch { 0 => details, 1 => tlsOutput, _ => enrollmentOutput };
+                if (tabs.SelectedIndex == 1) tlsResult = null;
+                if (tabs.SelectedIndex == 2) enrollmentResult = null;
+                output?.Text = "Operation failed\r\n\r\n" + messageText;
+            }
+            finally
+            {
+                // Restore tool interaction and report completion after the operation settles.
+                record(status.Text);
+                cancellation = null;
+                tabs.IsEnabled = true;
+                cancel.IsEnabled = false;
                 UpdateContextMenu();
-                try
-                {
-                    // Refresh OID names before running the operation and append resolution status.
-                    oids = await Task.Run(() => oidNames.Value.Refresh(), request.Token);
-                    request.Token.ThrowIfCancellationRequested();
-                    await operation(request.Token);
-                    status.Text += " · " + oids.Status;
-                }
-                catch (OperationCanceledException)
-                {
-                    status.Text = "Cancelled. Completed key/store/CA changes remain applied; review before retrying.";
-                }
-                catch (Exception error)
-                {
-                    // Display the complete failure in the active tool and a concise status message.
-                    var messageText = CaAdministration.Error(error);
-                    status.Text = messageText.Replace("\r", "").Split('\n')[0];
-                    var output = tabs.SelectedIndex switch { 0 => details, 1 => tlsOutput, _ => enrollmentOutput };
-                    if (tabs.SelectedIndex == 1) tlsResult = null;
-                    if (tabs.SelectedIndex == 2) enrollmentResult = null;
-                    output?.Text = "Operation failed\r\n\r\n" + messageText;
-                }
-                finally
-                {
-                    // Restore tool interaction and report completion after the operation settles.
-                    record(status.Text);
-                    cancellation = null;
-                    tabs.IsEnabled = true;
-                    cancel.IsEnabled = false;
-                    UpdateContextMenu();
-                }
             }
         }
 
@@ -215,7 +199,8 @@ namespace Certitude
         private void BuildInventory()
         {
             // Provide Windows store selection alongside file inspection and import actions.
-            var page = Page("_Windows stores / files", out var header);
+            var header = new StackPanel();
+            var page = Page("_Windows stores / files", header);
             var choose = new WrapPanel();
             header.Children.Add(choose);
             Label(choose, "Store location", location);
@@ -245,8 +230,8 @@ namespace Certitude
             Dialogs.Button(actions, "Export _CSV…", async () => await Run("Exporting inventory…", async token =>
             {
                 // Export only the currently filtered inventory rows to CSV.
-                var save = new FilePicker(true) { Filter = "CSV|*.csv", FileName = "certificate-inventory.csv" };
-                if (await save.ShowAsync() == true)
+                var save = await FilePicker.ChooseSave(this, "certificate-inventory.csv", "CSV|*.csv");
+                if (save != null)
                 {
                     CertificateUtilities.ExportInventory(inventory.Items.Cast<InventoryCertificate>(), save.FileName);
                     status.Text = "Exported the filtered inventory.";
@@ -277,18 +262,17 @@ namespace Certitude
             Dialogs.ScrollHeader(page, header, 150);
 
             // Define certificate metadata columns with appropriate widths and date formatting.
-            foreach (var column in new[] { new[] { "Subject", "Subject", "235" }, new[] { "Friendly Name", "FriendlyName", "160" },
-                new[] { "Expiry (UTC)", "NotAfter", "145" },
-                new[] { "Days left", "DaysLeft", "80" }, new[] { "Private key", "HasPrivateKey", "85" },
-                new[] { "Issuer", "Issuer", "250" }, new[] { "SAN", "AlternativeNames", "260" },
-                new[] { "EKU", "Purposes", "230" }, new[] { "Algorithm", "Algorithm", "100" },
-                new[] { "Key bits", "KeyBits", "80" }, new[] { "Findings", "Findings", "220" },
-                new[] { "Thumbprint", "Thumbprint", "330" } })
+            foreach (var (label, property, width) in new[] { ("Subject", "Subject", 235),
+                ("Friendly Name", "FriendlyName", 160), ("Expiry (UTC)", "NotAfter", 145),
+                ("Days left", "DaysLeft", 80), ("Private key", "HasPrivateKey", 85), ("Issuer", "Issuer", 250),
+                ("SAN", "AlternativeNames", 260),
+                ("EKU", "Purposes", 230), ("Algorithm", "Algorithm", 100), ("Key bits", "KeyBits", 80),
+                ("Findings", "Findings", 220), ("Thumbprint", "Thumbprint", 330) })
             {
-                var field = new DataGridTextColumn { Header = Dialogs.Caption(column[0]), Width = int.Parse(column[2]),
-                    SortMemberPath = column[1], Binding = column[1] == "NotAfter" ?
-                        TimeDisplay.Binding(column[1], "yyyy-MM-dd HH:mm") : new Binding(column[1]) };
-                if (column[1] == "NotAfter") TimeDisplay.Label(field, DataGridColumn.HeaderProperty, "Expiry (UTC)");
+                var field = new DataGridTextColumn { Header = Dialogs.Caption(label), Width = width,
+                    SortMemberPath = property, Binding = property == "NotAfter" ?
+                        TimeDisplay.Binding(property, "yyyy-MM-dd HH:mm") : new Binding(property) };
+                if (property == "NotAfter") TimeDisplay.Label(field, DataGridColumn.HeaderProperty, label);
                 inventory.Columns.Add(field);
             }
 
@@ -303,7 +287,7 @@ namespace Certitude
             {
                 // Open the native viewer only for a double-click on one selected certificate row.
                 if (cancellation != null || inventory.SelectedItems.Count != 1 ||
-                    ItemsControl.ContainerFromElement(inventory, e.OriginalSource as DependencyObject) is not DataGridRow) return;
+                    !Dialogs.IsRowClick(inventory, e)) return;
                 e.Handled = true;
                 ViewInWindows();
             };
@@ -360,22 +344,18 @@ namespace Certitude
                 .Concat(inventoryActions.Children.OfType<Button>()))
             {
                 // Require an appropriate selection and Windows store for each operation.
-                switch ((string)item.Tag)
+                bool? enabled = (string)item.Tag switch
                 {
-                    case "View":
-                    case "Windows":
-                    case "Validate": item.IsEnabled = any && selected.Length == 1; break;
-                    case "Export":
-                    case "Copy thumbprints":
-                    case "Copy subjects": item.IsEnabled = any; break;
-                    case "Key": item.IsEnabled = stored && selected.Length == 1 && selected[0].HasPrivateKey; break;
-                    case "Name": item.IsEnabled = stored && selected.Length == 1; break;
-                    case "Transfer":
-                    case "Remove": item.IsEnabled = stored; break;
-                    case "Select all": item.IsEnabled = ready && inventory.Items.Count > 0; break;
-                    case "Reload": item.IsEnabled = ready && loadedStore != null; break;
-                    case "CSV": item.IsEnabled = ready && inventory.Items.Count > 0; break;
-                }
+                    "View" or "Windows" or "Validate" => ready && selected.Length == 1,
+                    "Export" or "Copy thumbprints" or "Copy subjects" => any,
+                    "Key" => stored && selected.Length == 1 && selected[0].HasPrivateKey,
+                    "Name" => stored && selected.Length == 1,
+                    "Transfer" or "Remove" => stored,
+                    "Select all" or "CSV" => ready && inventory.Items.Count > 0,
+                    "Reload" => ready && loadedStore != null,
+                    _ => null
+                };
+                if (enabled.HasValue) item.IsEnabled = enabled.Value;
             }
             // Hide store-only actions when browsing a file or filtering out private keys.
             bool Applicable(FrameworkElement item) => (string)item.Tag switch
@@ -496,7 +476,7 @@ namespace Certitude
                 Dialogs.Button(buttons, "_Cancel", () => dialog.DialogResult = false);
 
                 // List every certificate and key association before accepting the import.
-                var list = Output();
+                var list = Dialogs.OutputBox(monospace: true);
                 list.Text = string.Join("\r\n\r\n", preview.Select(row => row.Subject + "\r\n" + row.Thumbprint +
                     "\r\nPrivate key: " + row.HasPrivateKey + "; CA: " + row.IsCa));
                 panel.Children.Add(list);
@@ -542,7 +522,7 @@ namespace Certitude
                 var certificate = Selected();
                 if (loadedStore == null) { Dialogs.WindowsCertificate(this, certificate.Encoded); return; }
                 CertificateUtilities.WithCertificate(loadedLocation, loadedStore, certificate.Thumbprint, false,
-                    (store, value) => { Dialogs.WindowsCertificate(this, value); return true; });
+                    (store, value) => Dialogs.WindowsCertificate(this, value));
             }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
         }
@@ -580,7 +560,7 @@ namespace Certitude
                 var name = await Dialogs.Prompt(this, "Edit Friendly Name", "Friendly Name", selected.FriendlyName);
                 if (name == null) return;
                 await Task.Run(() => CertificateUtilities.WithCertificate(loadedLocation, loadedStore,
-                    selected.Thumbprint, true, (store, certificate) => { certificate.FriendlyName = name; return true; }), token);
+                    selected.Thumbprint, true, (store, certificate) => { certificate.FriendlyName = name; }), token);
                 changed = true;
                 status.Text = "Friendly name updated. The signed certificate is unchanged.";
             });
@@ -663,7 +643,7 @@ namespace Certitude
                         try
                         {
                             CertificateUtilities.WithCertificate(loadedLocation, loadedStore, row.Thumbprint, true,
-                                (store, certificate) => { store.Remove(certificate); return true; });
+                                (store, certificate) => store.Remove(certificate));
                             text.AppendLine(row.Thumbprint + ": Removed");
                         }
                         catch (Exception error)
@@ -686,9 +666,10 @@ namespace Certitude
             // Choose an export format for a nonempty certificate selection.
             var selected = inventory.SelectedItems.Cast<InventoryCertificate>().ToArray();
             if (selected.Length == 0) throw new ArgumentException("Select certificates to export.");
-            var save = new FilePicker(true) { FileName = "certificate.cer", Filter =
-                "DER certificate (one)|*.cer|PEM certificate(s)|*.pem|PKCS #7 certificate(s)|*.p7b|PFX with private key (one)|*.pfx" };
-            if (await save.ShowAsync() != true) return;
+            var save = await FilePicker.ChooseSave(this, "certificate.cer",
+                "DER certificate (one)|*.cer|PEM certificate(s)|*.pem|" +
+                "PKCS #7 certificate(s)|*.p7b|PFX with private key (one)|*.pfx");
+            if (save == null) return;
             byte[] bytes;
             if (save.FilterIndex == 4)
             {
@@ -754,7 +735,8 @@ namespace Certitude
         private void BuildTls()
         {
             // Collect the connection address, TLS server name, and timeout for the endpoint check.
-            var page = Page("_TLS endpoint", out var header);
+            var header = new StackPanel();
+            var page = Page("_TLS endpoint", header);
             Dialogs.Note(header, "Check the certificate a service currently presents. " +
                 "Use a direct TLS port such as HTTPS 443 or LDAPS 636.");
             var fields = new WrapPanel();
@@ -790,7 +772,7 @@ namespace Certitude
             Dialogs.Button(actions, "Export _certificate…", async () => await SaveTls(false));
             Dialogs.Button(actions, "Export _chain…", async () => await SaveTls(true));
             Dialogs.Button(actions, "_Save report…", async () => await SaveText(tlsOutput.Text, "tls-report.txt"));
-            tlsOutput = Output();
+            tlsOutput = Dialogs.OutputBox(monospace: true);
             Dialogs.CertificateMenu(tlsOutput, () => tlsResult?.Certificate, ready: () => cancellation == null);
             page.Children.Add(tlsOutput);
             Dialogs.ScrollHeader(page, header);
@@ -821,36 +803,31 @@ namespace Certitude
 
         private async Task SaveTls(bool chain)
         {
-            try
+            // Export the collected chain or leaf certificate from the selected probe.
+            var result = tlsResult;
+            if (result?.Certificate == null)
             {
-                // Require a captured endpoint certificate before choosing its export destination.
-                if (tlsResult?.Certificate == null)
-                    throw new ArgumentException("No endpoint certificate is available.");
-                var save = new FilePicker(true) { FileName = chain ? "tls-chain.p7b" : "tls-certificate.cer",
-                    Filter = chain ? "PKCS #7|*.p7b" : "DER certificate|*.cer" };
-                if (await save.ShowAsync() != true) return;
-
-                // Export the collected chain or leaf certificate and save it atomically.
-                var bytes = chain ? CertificateUtilities.ExportPublic(tlsResult.Chain.Count > 0 ?
-                    tlsResult.Chain : new List<byte[]> { tlsResult.Certificate }, 2) : tlsResult.Certificate;
-                CertificateUtilities.WriteAtomic(save.FileName, bytes);
-                status.Text = "Saved " + save.FileName;
+                status.Text = "No endpoint certificate is available.";
+                return;
             }
-            catch (Exception error) { status.Text = CaAdministration.Error(error); }
+            var path = await Dialogs.SaveFile(this, chain ? "tls-chain.p7b" : "tls-certificate.cer",
+                chain ? "PKCS #7|*.p7b" : "DER certificate|*.cer", _ => chain ?
+                    CertificateUtilities.ExportPublic(result.Chain.Count > 0 ? result.Chain : [result.Certificate], 2) :
+                    result.Certificate, status);
+            if (path != null) status.Text = "Saved " + path;
         }
 
         private void BuildEnrollment(string config)
         {
             // Arrange enrollment settings above response actions and diagnostic output.
-            var page = Page("_Request / install", out var header);
-            page.Children.Remove(header);
             var body = new Grid();
+            Page("_Request / install", body);
+            var header = new StackPanel();
             body.RowDefinitions.Add(new RowDefinition { Height = new GridLength(3, GridUnitType.Star) });
             body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             body.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 110 });
             Grid.SetRow(header, 1);
             body.Children.Add(header);
-            page.Children.Add(body);
 
             // Create a scrolling request form and explain the key context requirements.
             var form = new StackPanel();
@@ -909,10 +886,7 @@ namespace Certitude
             var request = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 6, 4) };
             submit.Children.Add(request);
             requestId = new TextBox { Width = 95, ToolTip = "Pending or issued request ID" };
-            var requestLabel = Glyphs.Label("Request ID", true);
-            requestLabel.Target = requestId;
-            request.Children.Add(requestLabel);
-            request.Children.Add(requestId);
+            Dialogs.InlineField(request, "Request ID", requestId);
             Dialogs.Button(submit, "_Retrieve", async () => await SendRequest(true));
 
             // Place issued-response actions between the request form and enrollment output.
@@ -922,16 +896,14 @@ namespace Certitude
             {
                 // Save an issued certificate only when the last enrollment returned one.
                 if (enrollmentResult?.Certificate == null) { status.Text = "No issued response is available."; return; }
-                var save = new FilePicker(true) { Filter = "DER certificate|*.cer", FileName = "issued.cer" };
-                if (await save.ShowAsync() != true) return;
-                try { CertificateUtilities.WriteAtomic(save.FileName, enrollmentResult.Certificate); }
-                catch (Exception error) { status.Text = CaAdministration.Error(error); }
+                await Dialogs.SaveFile(this, "issued.cer", "DER certificate|*.cer",
+                    _ => enrollmentResult.Certificate, status);
             });
 
             // Provide response installation, log export, and certificate viewing from enrollment results.
             Dialogs.Button(actions, "_Accept response file…", async () => await AcceptResponse());
             Dialogs.Button(actions, "Save _log…", async () => await SaveText(enrollmentOutput.Text, "enrollment-log.txt"));
-            enrollmentOutput = Output();
+            enrollmentOutput = Dialogs.OutputBox(monospace: true);
             Dialogs.CertificateMenu(enrollmentOutput, () => enrollmentResult?.Certificate,
                 ready: () => cancellation == null);
             Dialogs.ComparisonMenu(enrollmentOutput, () => ComparisonSource.File(requestPath.Text.Trim()),
@@ -953,8 +925,8 @@ namespace Certitude
             // Validate request settings and confirm key creation before generating the CSR.
             var options = Options();
             var inf = options.CreateInf();
-            var save = new FilePicker(true) { FileName = "certificate.req", Filter = "Certificate request|*.req;*.csr" };
-            if (await save.ShowAsync() != true) return;
+            var save = await FilePicker.ChooseSave(this, "certificate.req", "Certificate request|*.req;*.csr");
+            if (save == null) return;
             if (!await Confirm("Create private key and CSR", "Create a new " + options.Algorithm + " key in the " +
                 (options.Machine ? "LOCAL MACHINE" : "CURRENT USER") + " context on " + Environment.MachineName +
                 "?\r\n\r\n" + inf)) return;
@@ -1017,13 +989,8 @@ namespace Certitude
             });
         }
 
-        private async Task SaveText(string text, string filename)
-        {
-            // Save diagnostic or enrollment text atomically to the selected file.
-            var save = new FilePicker(true) { FileName = filename, Filter = "Text / INF|*.txt;*.inf|All files|*.*" };
-            if (await save.ShowAsync() != true) return;
-            try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(text)); }
-            catch (Exception error) { status.Text = CaAdministration.Error(error); }
-        }
+        private Task SaveText(string text, string filename) =>
+            Dialogs.SaveFile(this, filename, "Text / INF|*.txt;*.inf|All files|*.*",
+                _ => Encoding.UTF8.GetBytes(text), status);
     }
 }

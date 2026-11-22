@@ -30,14 +30,13 @@ namespace Certitude
     public sealed class TimeDisplay : INotifyPropertyChanged, IMultiValueConverter
     {
         public static TimeDisplay Current { get; } = new TimeDisplay();
-        private bool useUtc;
         public bool UseUtc
         {
-            get => useUtc;
+            get;
             set
             {
-                if (useUtc == value) return;
-                useUtc = value;
+                if (field == value) return;
+                field = value;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
             }
         }

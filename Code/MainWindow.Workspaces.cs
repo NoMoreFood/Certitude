@@ -128,15 +128,12 @@ namespace Certitude
         {
             // Advance rolling UTC boundaries without scheduling recursive filter refreshes.
             if (!expiryDays.HasValue) return;
-            var previous = restoringView;
-            restoringView = true;
-            try
+            WithoutFiltering(() =>
             {
                 var now = utcNow ?? DateTime.UtcNow;
                 ExpiresFrom.Text = expiryDays > 0 ? TimeDisplay.Entry(now) : "";
                 ExpiresBefore.Text = TimeDisplay.Entry(now.AddDays(expiryDays.Value));
-            }
-            finally { restoringView = previous; }
+            });
         }
 
         private void RestoreViewControls(BrowserView view)
@@ -144,8 +141,7 @@ namespace Certitude
             // Validate once and suppress live filtering while replacing the browser controls.
             view.Validate(false);
             var filter = view.Query(DateTime.UtcNow);
-            restoringView = true;
-            try
+            WithoutFiltering(() =>
             {
                 filterTimer.Stop();
                 ConfigurationBox.Text = ConfigurationCaption(view.Configuration);
@@ -176,8 +172,15 @@ namespace Certitude
                     column.SortDirection = column.SortMemberPath == sortField ? sortDirection :
                         (System.ComponentModel.ListSortDirection?)null;
                 ViewTitle.Text = Convert.ToString(((ListBoxItem)Views.SelectedItem).Content);
-            }
-            finally { restoringView = false; }
+            });
+        }
+
+        private static Button SidebarButton(string name, string toolTip, string icon)
+        {
+            var button = new Button { Content = name.Replace("_", "__"), ToolTip = toolTip };
+            System.Windows.Automation.AutomationProperties.SetName(button, name);
+            Glyphs.SetIcon(button, icon);
+            return button;
         }
 
         private void ReloadSavedViews(string selectedName = null)
@@ -190,14 +193,8 @@ namespace Certitude
             PinnedViewsPanel.Children.Clear();
             foreach (var view in views.Where(view => view.Pinned))
             {
-                var button = new Button
-                {
-                    Content = view.Name.Replace("_", "__"),
-                    HorizontalContentAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 4),
-                    ToolTip = view.Name + Environment.NewLine + view.Configuration
-                };
-                System.Windows.Automation.AutomationProperties.SetName(button, view.Name);
-                Glyphs.SetIcon(button, Glyphs.List);
+                var button = SidebarButton(view.Name, view.Name + Environment.NewLine + view.Configuration,
+                    Glyphs.List);
                 button.Click += async (sender, args) => await OpenSavedView(view);
                 // Expose view management directly on each pinned shortcut.
                 var menu = new ContextMenu();
@@ -407,14 +404,11 @@ namespace Certitude
             footer.Children.Add(actions);
             Dialogs.Button(actions, "_Review Publication…", () => prompt.DialogResult = true);
             Dialogs.Button(actions, "_Not Now", prompt.Close);
-            layout.Children.Add(new TextBox
-            {
-                IsReadOnly = true, TextWrapping = TextWrapping.Wrap, AcceptsReturn = true,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalContentAlignment = VerticalAlignment.Top,
-                Text = "Revocation changes completed on these CAs:\r\n\r\n" + string.Join("\r\n", affected) +
-                    "\r\n\r\nPublish CRLs to distribute the changes. Review publication lets you choose base or " +
-                    "delta CRLs and confirm these targets before publishing."
-            });
+            var message = Dialogs.OutputBox();
+            message.Text = "Revocation changes completed on these CAs:\r\n\r\n" + string.Join("\r\n", affected) +
+                "\r\n\r\nPublish CRLs to distribute the changes. Review publication lets you choose base or " +
+                "delta CRLs and confirm these targets before publishing.";
+            layout.Children.Add(message);
             prompt.Content = layout;
             var publish = await prompt.ShowAsync() == true;
             if (suppress.IsChecked == true)
@@ -551,13 +545,7 @@ namespace Certitude
             {
                 foreach (var link in ApplicationLinks.Read())
                 {
-                    var button = new Button
-                    {
-                        Content = link.Key.Replace("_", "__"), ToolTip = link.Value,
-                        HorizontalContentAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 4)
-                    };
-                    System.Windows.Automation.AutomationProperties.SetName(button, link.Key);
-                    Glyphs.SetIcon(button, Glyphs.Open);
+                    var button = SidebarButton(link.Key, link.Value, Glyphs.Open);
                     button.Click += async (sender, args) =>
                     {
                         // Check folder availability away from the UI thread before invoking the Windows shell.

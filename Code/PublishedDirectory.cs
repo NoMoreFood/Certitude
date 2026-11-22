@@ -16,28 +16,21 @@ using System.Text;
 
 namespace Certitude
 {
-    internal sealed class PublishedStore
+    internal sealed class PublishedStore(string id, string name, string container,
+        string attribute, string objectClass, string effect)
     {
-        public string Id { get; }
-        public string Name { get; }
-        public string Container { get; }
-        public string Attribute { get; }
-        public string ObjectClass { get; }
-        public string Effect { get; }
+        public string Id { get; } = id;
+        public string Name { get; } = name;
+        public string Container { get; } = container;
+        public string Attribute { get; } = attribute;
+        public string ObjectClass { get; } = objectClass;
+        public string Effect { get; } = effect;
         public bool FixedObject => Id == "NTAuthCA";
         public bool IsCrl => ObjectClass == "cRLDistributionPoint";
         public string ItemName => IsCrl ? "CRL" : "Certificate";
         public bool ExistingOnly => Id == "Enrollment" || IsCrl;
         public bool RequiredValue => !ExistingOnly && Id != "CrossCA";
         public override string ToString() => Name;
-
-        public PublishedStore(string id, string name, string container,
-            string attribute, string objectClass, string effect)
-        {
-            // Describe the directory location and effect of this publication store.
-            Id = id; Name = name; Container = container;
-            Attribute = attribute; ObjectClass = objectClass; Effect = effect;
-        }
     }
 
     internal sealed class PublishedObject
@@ -104,32 +97,32 @@ namespace Certitude
     {
         public static readonly PublishedStore[] Stores =
         {
-            new PublishedStore("NTAuthCA", "NTAuth Certificates", "", "cACertificate", "certificationAuthority",
+            new("NTAuthCA", "NTAuth Certificates", "", "cACertificate", "certificationAuthority",
                 "Changes which CAs the forest accepts for certificate-based authentication."),
-            new PublishedStore("RootCA", "Trusted Root CAs", "Certification Authorities", "cACertificate",
+            new("RootCA", "Trusted Root CAs", "Certification Authorities", "cACertificate",
                 "certificationAuthority", "Changes the trusted root CA certificates distributed through Active Directory."),
-            new PublishedStore("SubCA", "Intermediate CAs / AIA", "AIA", "cACertificate", "certificationAuthority",
+            new("SubCA", "Intermediate CAs / AIA", "AIA", "cACertificate", "certificationAuthority",
                 "Changes CA certificates available to clients building certificate chains through LDAP AIA locations."),
-            new PublishedStore("CrossCA", "Cross-Certificates / AIA", "AIA", "crossCertificatePair",
+            new("CrossCA", "Cross-Certificates / AIA", "AIA", "crossCertificatePair",
                 "certificationAuthority", "Changes cross-certificates used to build certification paths. " +
                 "New certificates are published as the forward side of a certificate pair."),
-            new PublishedStore("KRA", "Key Recovery Agents", "KRA", "userCertificate", "msPKI-PrivateKeyRecoveryAgent",
+            new("KRA", "Key Recovery Agents", "KRA", "userCertificate", "msPKI-PrivateKeyRecoveryAgent",
                 "Changes published key recovery agent certificates. Configure CA key recovery separately."),
-            new PublishedStore("Enrollment", "Enrollment Services", "Enrollment Services", "cACertificate",
+            new("Enrollment", "Enrollment Services", "Enrollment Services", "cACertificate",
                 "pKIEnrollmentService", "Changes the certificates advertised by an existing enrollment service. " +
                 "CA configuration and published templates stay unchanged."),
-            new PublishedStore("BaseCRL", "Base CRLs", "", "certificateRevocationList", "cRLDistributionPoint",
+            new("BaseCRL", "Base CRLs", "", "certificateRevocationList", "cRLDistributionPoint",
                 "Changes base revocation lists available to clients through this AD publication location."),
-            new PublishedStore("DeltaCRL", "Delta CRLs", "", "deltaRevocationList", "cRLDistributionPoint",
+            new("DeltaCRL", "Delta CRLs", "", "deltaRevocationList", "cRLDistributionPoint",
                 "Changes delta revocation lists. Clients also need the matching base CRL."),
-            new PublishedStore("ARL", "Authority Revocation Lists", "", "authorityRevocationList",
+            new("ARL", "Authority Revocation Lists", "", "authorityRevocationList",
                 "cRLDistributionPoint", "Changes revocation lists for CA certificates at this AD publication location.")
         };
         public string Server => oidDirectory.Server;
         public string ConfigurationName => oidDirectory.ConfigurationName;
         private readonly OidDirectory oidDirectory;
         internal OidNames Names => OidNames.Load(oidDirectory);
-        internal string ServicesName => "CN=Public Key Services,CN=Services," + ConfigurationName;
+        private string ServicesName => oidDirectory.ServicesName;
 
         private PublishedDirectory(OidDirectory directory)
         {
@@ -266,9 +259,7 @@ namespace Certitude
                             encoded, target.DistinguishedName, null, null, names);
                         return row;
                     }
-                    using var certificate = new X509Certificate2(encoded);
-                    if (!certificate.RawData.SequenceEqual(encoded))
-                        throw new CryptographicException("Invalid certificate data.");
+                    using var certificate = CertificateUtilities.SingleCertificate(encoded);
                     row.Certificate = CertificateUtilities.Describe(certificate, names);
                 }
                 catch (Exception error) when (error is CryptographicException or Win32Exception or ArgumentException)
@@ -331,11 +322,7 @@ namespace Certitude
         internal static InventoryCertificate ValidateCertificate(PublishedStore store, byte[] encoded, OidNames names = null)
         {
             // Require exactly one encoded certificate before checking store-specific requirements.
-            if (encoded == null || X509Certificate2.GetCertContentType(encoded) != X509ContentType.Cert)
-                throw new ArgumentException("Select a single public certificate in DER or PEM format.");
-            using var certificate = new X509Certificate2(encoded);
-            if (!certificate.RawData.SequenceEqual(encoded))
-                throw new ArgumentException("Select a single public certificate in DER or PEM format.");
+            using var certificate = CertificateUtilities.SingleCertificate(encoded);
 
             // Enforce CA constraints or key recovery usage according to the destination store.
             var metadata = CertificateUtilities.Describe(certificate, names);
@@ -527,42 +514,29 @@ namespace Certitude
 
         internal static byte[][] DecodePair(byte[] value)
         {
-            // Track the current DER position while extracting certificate pair members.
+            // Read canonical DER lengths and keep both directions inside the enclosing sequence.
             var offset = 0;
-            byte[] Read(byte tag, byte[] bytes)
+            try
             {
-                // Require the expected tag and decode its bounded DER length.
-                if (offset + 2 > bytes.Length || bytes[offset++] != tag)
+                if (OidNames.ReadElement(value, ref offset, value.Length, out var end, canonicalLength: true) != 0x30)
                     throw new ArgumentException("Invalid cross-certificate pair.");
-                var length = (int)bytes[offset++];
-                if ((length & 128) != 0)
+                if (end != value.Length) throw new ArgumentException("Trailing cross-certificate pair data.");
+                if (offset == end) throw new ArgumentException("Invalid cross-certificate pair length.");
+                var pair = new byte[2][];
+                for (var side = 0; side < pair.Length; side++)
                 {
-                    var count = length & 127;
-                    if (count == 0 || count > 4 || offset + count > bytes.Length || bytes[offset] == 0)
-                        throw new ArgumentException("Invalid cross-certificate pair length.");
-                    long size = 0;
-                    for (var i = 0; i < count; i++) size = (size << 8) | bytes[offset++];
-                    if (size < 128 || size > bytes.Length - offset)
-                        throw new ArgumentException("Invalid cross-certificate pair length.");
-                    length = (int)size;
+                    if (offset == end || value[offset] != 0xa0 + side) continue;
+                    OidNames.ReadElement(value, ref offset, end, out var finish, canonicalLength: true);
+                    if (offset == finish) throw new ArgumentException("Invalid cross-certificate pair length.");
+                    pair[side] = new byte[finish - offset];
+                    Buffer.BlockCopy(value, offset, pair[side], 0, finish - offset);
+                    offset = finish;
                 }
-                // Copy a nonempty member payload and advance past it.
-                if (length == 0 || length > bytes.Length - offset)
-                    throw new ArgumentException("Invalid cross-certificate pair length.");
-                var result = bytes.Skip(offset).Take(length).ToArray();
-                offset += length;
-                return result;
+                if (offset != end) throw new ArgumentException("Invalid cross-certificate pair members.");
+                return pair;
             }
-            // Validate the outer sequence and consume only supported pair directions.
-            var content = Read(0x30, value);
-            if (offset != value.Length) throw new ArgumentException("Trailing cross-certificate pair data.");
-            offset = 0;
-            var pair = new byte[2][];
-            if (content[offset] == 0xa0) pair[0] = Read(0xa0, content);
-            if (offset < content.Length && content[offset] == 0xa1) pair[1] = Read(0xa1, content);
-            if (offset != content.Length || pair.All(part => part == null))
-                throw new ArgumentException("Invalid cross-certificate pair members.");
-            return pair;
+            catch (CryptographicException error)
+            { throw new ArgumentException("Invalid cross-certificate pair length.", error); }
         }
     }
 }

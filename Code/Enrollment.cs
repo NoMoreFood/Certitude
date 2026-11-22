@@ -102,6 +102,20 @@ namespace Certitude
 
     internal static class Enrollment
     {
+        internal static EnrollmentResult Submit(ICertRequest request, string configuration, byte[] bytes,
+            string attributes) => Result(request, request.Submit(0x101, Convert.ToBase64String(
+                CertificateUtilities.DecodeObject(bytes, "CERTIFICATE REQUEST", "NEW CERTIFICATE REQUEST")),
+                attributes, configuration));
+
+        private static EnrollmentResult Result(ICertRequest request, int disposition)
+        {
+            // Capture the request identity and native status before downloading an issued response.
+            var id = request.GetRequestId();
+            return new EnrollmentResult { RequestId = id, Disposition = disposition,
+                Report = $"Request {id}: {CaAdministration.RequestDisposition(disposition)}\r\n" +
+                    request.GetDispositionMessage() + $"\r\nStatus: 0x{request.GetLastStatus():X8}" };
+        }
+
         public static EnrollmentResult Request(string configuration, byte[] requestBytes,
             int requestId, string template)
         {
@@ -110,31 +124,25 @@ namespace Certitude
             if (template.Length > 0 && !Regex.IsMatch(template, @"^[A-Za-z0-9_.-]+$"))
                 throw new ArgumentException("Enter the template's internal name or OID.");
             if (requestBytes == null && requestId <= 0) throw new ArgumentException("Enter a positive request ID.");
-            using (var scope = ComScope<ICertRequest>.Create("CertificateAuthority.Request"))
-            {
-                // Submit a new request or retrieve the existing request while retaining the CA disposition.
-                var request = scope.Value;
-                var disposition = requestBytes == null ? request.RetrievePending(requestId, configuration) :
-                    request.Submit(0x101, Convert.ToBase64String(CertificateUtilities.DecodeObject(
-                        requestBytes, "CERTIFICATE REQUEST", "NEW CERTIFICATE REQUEST")),
-                        template.Length == 0 ? "" : "CertificateTemplate:" + template, configuration);
-                var result = new EnrollmentResult { Disposition = disposition, RequestId = request.GetRequestId() };
-                result.Report = $"CA: {configuration}\r\nRequest {result.RequestId}: " +
-                    CaAdministration.RequestDisposition(disposition) + "\r\n" + request.GetDispositionMessage() +
-                    $"\r\nStatus: 0x{request.GetLastStatus():X8}";
+            using var scope = ComScope<ICertRequest>.Create("CertificateAuthority.Request");
+            // Submit a new request or retrieve the existing request while retaining the CA disposition.
+            var request = scope.Value;
+            var result = requestBytes == null ? Result(request, request.RetrievePending(requestId, configuration)) :
+                Submit(request, configuration, requestBytes,
+                    template.Length == 0 ? "" : "CertificateTemplate:" + template);
+            result.Report = $"CA: {configuration}\r\n" + result.Report;
 
-                // Download issued certificate bytes without losing the request ID if retrieval alone fails.
-                if (disposition == 3)
+            // Download issued certificate bytes without losing the request ID if retrieval alone fails.
+            if (result.Disposition == 3)
+            {
+                try { result.Certificate = Convert.FromBase64String(request.GetCertificate(1)); }
+                catch (Exception error)
                 {
-                    try { result.Certificate = Convert.FromBase64String(request.GetCertificate(1)); }
-                    catch (Exception error)
-                    {
-                        result.Report += "\r\nIssued, but downloading the response failed. " +
-                            "Retrieve this request ID again: " + CaAdministration.Error(error);
-                    }
+                    result.Report += "\r\nIssued, but downloading the response failed. " +
+                        "Retrieve this request ID again: " + CaAdministration.Error(error);
                 }
-                return result;
             }
+            return result;
         }
 
         public static async Task<string> CreateRequest(string inf, string path, CancellationToken token)
@@ -174,33 +182,29 @@ namespace Certitude
                 RedirectStandardError = true, RedirectStandardInput = true,
                 StandardOutputEncoding = Encoding.Unicode, StandardErrorEncoding = Encoding.Unicode
             };
-            using (var process = new Process { StartInfo = start })
+            using var process = new Process { StartInfo = start };
+            // Disable interactive input and stop the process if the user cancels the operation.
+            process.Start();
+            process.StandardInput.Close();
+            using var registration = token.Register(() =>
             {
-                // Disable interactive input and stop the process if the user cancels the operation.
-                process.Start();
-                process.StandardInput.Close();
-                using (token.Register(() =>
-                {
-                    try { if (!process.HasExited) process.Kill(); }
-                    catch (InvalidOperationException) { }
-                    catch (System.ComponentModel.Win32Exception) { }
-                }))
-                {
-                    // Drain both output streams together before interpreting completion or cancellation.
-                    var output = ReadOutput(process.StandardOutput);
-                    var errors = ReadOutput(process.StandardError);
-                    await Task.Run(() => process.WaitForExit()).ConfigureAwait(false);
-                    var text = await output.ConfigureAwait(false) + "\r\n" + await errors.ConfigureAwait(false);
-                    token.ThrowIfCancellationRequested();
+                try { if (!process.HasExited) process.Kill(); }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+            });
+            // Drain both output streams together before interpreting completion or cancellation.
+            var output = ReadOutput(process.StandardOutput);
+            var errors = ReadOutput(process.StandardError);
+            await Task.Run(() => process.WaitForExit()).ConfigureAwait(false);
+            var text = await output.ConfigureAwait(false) + "\r\n" + await errors.ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
 
-                    // Report native failures with guidance about key or store changes already completed.
-                    if (process.ExitCode != 0) throw new InvalidOperationException(
-                        $"certreq exited with 0x{process.ExitCode:X8}.\r\n{text}\r\n" +
-                        "Completed key/store changes may remain. " +
-                        "Review the Windows Request/Personal stores before retrying.");
-                    return text.Trim();
-                }
-            }
+            // Report native failures with guidance about key or store changes already completed.
+            if (process.ExitCode != 0) throw new InvalidOperationException(
+                $"certreq exited with 0x{process.ExitCode:X8}.\r\n{text}\r\n" +
+                "Completed key/store changes may remain. " +
+                "Review the Windows Request/Personal stores before retrying.");
+            return text.Trim();
         }
 
         private static async Task<string> ReadOutput(StreamReader reader)

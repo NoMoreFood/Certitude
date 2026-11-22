@@ -11,11 +11,9 @@ namespace Certitude
     // Vtable order and identifiers follow certview.h, certadm.h and certcli.h in the Windows SDK.
 
     // Each scope is created, used and disposed on the same worker thread; RCWs never reach the UI.
-    internal sealed class ComScope<T> : IDisposable where T : class
+    internal sealed class ComScope<T>(T value) : IDisposable where T : class
     {
-        public T Value { get; }
-
-        public ComScope(T value) => Value = value;
+        public T Value { get; } = value;
 
         public static ComScope<T> Create(string progId)
         {

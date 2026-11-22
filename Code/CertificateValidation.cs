@@ -56,12 +56,8 @@ namespace Certitude
         {
             // Require one public certificate before returning normalized DER bytes.
             var bytes = CertificateUtilities.ReadEncoded(path);
-            if (X509Certificate2.GetCertContentType(bytes) != X509ContentType.Cert)
-                throw new ArgumentException("Select a single public certificate in DER or PEM format.");
-            using var certificate = new X509Certificate2(bytes);
-            if (!certificate.RawData.SequenceEqual(bytes))
-                throw new ArgumentException("Select a single encoded certificate without trailing data.");
-            return certificate.RawData;
+            using var certificate = CertificateUtilities.SingleCertificate(bytes);
+            return bytes;
         }
 
         public static ValidationResult Validate(byte[] encoded, string[] issuers, string[] crls, bool offline,
@@ -80,159 +76,157 @@ namespace Certitude
             var extra = new X509Certificate2Collection();
             var inputs = new List<KeyValuePair<string, byte[]>>();
             var notes = new StringBuilder();
-            using (var certificate = new X509Certificate2(encoded))
-            using (var store = CertOpenStore(new IntPtr(2), 0, IntPtr.Zero, 0, IntPtr.Zero))
+            using var certificate = new X509Certificate2(encoded);
+            using var store = CertOpenStore(new IntPtr(2), 0, IntPtr.Zero, 0, IntPtr.Zero);
+            if (store.IsInvalid) throw NativeError();
+            try
             {
-                if (store.IsInvalid) throw NativeError();
-                try
+                // Load only public issuer certificates or chains into the validation context.
+                foreach (var path in issuers)
                 {
-                    // Load only public issuer certificates or chains into the validation context.
-                    foreach (var path in issuers)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        var bytes = CertificateUtilities.ReadEncoded(path, token: token);
-                        var kind = X509Certificate2.GetCertContentType(bytes);
-                        if (kind is not (X509ContentType.Cert or X509ContentType.Pkcs7))
-                            throw new ArgumentException("Issuer files must contain public certificates or a PKCS #7 chain.");
-                        extra.Import(bytes);
-                    }
-                    // Populate the temporary Windows store with supplied issuers and CRLs.
-                    foreach (var issuer in extra)
-                        if (!CertAddCertificateContextToStore(store, issuer.Handle, 4, IntPtr.Zero)) throw NativeError();
-                    foreach (var path in crls)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        AddCrl(store, inputs, path, CertificateUtilities.ReadEncoded(path, 100, token));
-                    }
-
-                    // Collect the certificate distribution points for reporting and optional retrieval.
-                    var urls = new Queue<string>(Urls(certificate.Handle, 2).Concat(Urls(certificate.Handle, 6)));
-                    notes.AppendLine("Certificate CRL distribution points:");
-                    foreach (var url in urls) notes.AppendLine("  " + url);
-                    if (urls.Count == 0) notes.AppendLine("  No URL distribution points in this certificate.");
-                    var seen = new HashSet<string>(StringComparer.Ordinal);
-                    if (retrieve)
-                    {
-                        // Follow base and delta CRL locations while avoiding duplicate URL requests.
-                        for (var i = 0; i < inputs.Count; i++)
-                            foreach (var url in DeltaUrls(certificate.Handle, inputs[i].Value)) urls.Enqueue(url);
-                        while (urls.Count > 0)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            var url = urls.Dequeue();
-                            if (!seen.Add(url)) continue;
-                            progress?.Report((offline ? "Reading cached CRL: " : "Retrieving CRL: ") + url);
-                            try
-                            {
-                                // Retain each retrieved CRL and discover any further delta locations it advertises.
-                                foreach (var bytes in RetrieveCrls(url, offline, timeoutSeconds))
-                                {
-                                    AddCrl(store, inputs, url, bytes);
-                                    foreach (var delta in DeltaUrls(certificate.Handle, bytes)) urls.Enqueue(delta);
-                                }
-                            }
-                            catch (Exception error) { notes.AppendLine(url + "\r\n  " + CaAdministration.Error(error)); }
-                        }
-                    }
-                    // Build the Windows chain using the configured network policy and supplied material.
                     token.ThrowIfCancellationRequested();
-                    progress?.Report("Checking the certificate chain and revocation status…");
-                    using (var native = BuildChain(certificate, store, offline, timeoutSeconds))
-                    using (var chain = new X509Chain(native.DangerousGetHandle()))
+                    var bytes = CertificateUtilities.ReadEncoded(path, token: token);
+                    var kind = X509Certificate2.GetCertContentType(bytes);
+                    if (kind is not (X509ContentType.Cert or X509ContentType.Pkcs7))
+                        throw new ArgumentException("Issuer files must contain public certificates or a PKCS #7 chain.");
+                    extra.Import(bytes);
+                }
+                // Populate the temporary Windows store with supplied issuers and CRLs.
+                foreach (var issuer in extra)
+                    if (!CertAddCertificateContextToStore(store, issuer.Handle, 4, IntPtr.Zero)) throw NativeError();
+                foreach (var path in crls)
+                {
+                    token.ThrowIfCancellationRequested();
+                    AddCrl(store, inputs, path, CertificateUtilities.ReadEncoded(path, 100, token));
+                }
+
+                // Collect the certificate distribution points for reporting and optional retrieval.
+                var urls = new Queue<string>(Urls(certificate.Handle, 2).Concat(Urls(certificate.Handle, 6)));
+                notes.AppendLine("Certificate CRL distribution points:");
+                foreach (var url in urls) notes.AppendLine("  " + url);
+                if (urls.Count == 0) notes.AppendLine("  No URL distribution points in this certificate.");
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                if (retrieve)
+                {
+                    // Follow base and delta CRL locations while avoiding duplicate URL requests.
+                    for (var i = 0; i < inputs.Count; i++)
+                        foreach (var url in DeltaUrls(certificate.Handle, inputs[i].Value)) urls.Enqueue(url);
+                    while (urls.Count > 0)
                     {
-                        // Capture chain errors and identify the certificate and validation settings.
                         token.ThrowIfCancellationRequested();
-                        result.ChainErrors = chain.ChainStatus.Aggregate(X509ChainStatusFlags.NoError,
-                            (flags, status) => flags | status.Status);
-                        var text = new TimeReport();
-                        text.AppendLine("Certificate: " + certificate.Subject);
-                        text.AppendLine("Issuer: " + certificate.Issuer);
-                        text.AppendLine("Serial: " + certificate.SerialNumber);
-                        text.AppendLine("SHA-256: " + CertificateUtilities.Sha256(certificate.RawData));
-                        text.Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine();
-                        text.AppendLine("OID Resolution: " + names.Status);
-                        text.AppendLine("Mode: " + (offline ? "Offline / local files and Windows cache" : "Online"));
-                        text.AppendLine("Revocation scope: " +
-                            (entireChain ? "Chain, excluding the root" : "Selected certificate"));
-                        text.AppendLine();
-
-                        // Require a returned chain and explain the limits of revocation evidence.
-                        var context = Read<ChainArray>(native.DangerousGetHandle());
-                        if (context.Count == 0) throw new InvalidOperationException("Windows returned an empty chain.");
-                        result.Revocation = "Not checked";
-                        text.AppendLine("Windows uses its trust stores, supplied certificates/CRLs and cache; " +
-                            "online mode may use OCSP.");
-                        text.AppendLine("A missing, expired or inaccessible CRL is not proof " +
-                            "that a certificate is not revoked.");
-                        text.AppendLine();
-
-                        // Inspect supplied and retrieved CRLs against available issuer certificates.
-                        var candidates = extra.Cast<X509Certificate2>().Concat(
-                            chain.ChainElements.Cast<X509ChainElement>().Select(element => element.Certificate)).ToArray();
-                        foreach (var input in inputs)
+                        var url = urls.Dequeue();
+                        if (!seen.Add(url)) continue;
+                        progress?.Report((offline ? "Reading cached CRL: " : "Retrieving CRL: ") + url);
+                        try
                         {
-                            token.ThrowIfCancellationRequested();
-                            result.Crls.Add(InspectCrl(input.Value, input.Key, certificate, candidates, names));
-                        }
-                        // Walk every returned chain and report each element trust status.
-                        text.AppendLine("WINDOWS CHAIN RESULTS");
-                        for (var chainIndex = 0; chainIndex < context.Count; chainIndex++)
-                        {
-                            var simple = Read<ChainArray>(Marshal.ReadIntPtr(context.Items, chainIndex * IntPtr.Size));
-                            for (var i = 0; i < simple.Count; i++)
+                            // Retain each retrieved CRL and discover any further delta locations it advertises.
+                            foreach (var bytes in RetrieveCrls(url, offline, timeoutSeconds))
                             {
-                                token.ThrowIfCancellationRequested();
-                                var element = Read<ChainElement>(Marshal.ReadIntPtr(simple.Items, i * IntPtr.Size));
-                                using (var item = new X509Certificate2(element.Certificate))
-                                    text.AppendLine(item.Subject + "\r\n  " + (X509ChainStatusFlags)element.Trust.Errors);
-
-                                // Limit revocation checks to the requested scope, excluding a chain root.
-                                var selected = chainIndex == 0 && i == 0;
-                                var root = i == simple.Count - 1 && (element.Trust.Information & 8) != 0;
-                                if ((!entireChain && !selected) || (entireChain && root))
-                                {
-                                    text.AppendLine("  Revocation: not checked (outside the selected scope).");
-                                    continue;
-                                }
-                                // Check revocation with the next chain element as the candidate issuer.
-                                var issuer = i + 1 < simple.Count ? Read<ChainElement>(
-                                    Marshal.ReadIntPtr(simple.Items, (i + 1) * IntPtr.Size)).Certificate : IntPtr.Zero;
-                                var check = CheckRevocation(element.Certificate, issuer,
-                                    store, offline, timeoutSeconds);
-                                if (selected) result.Revocation = check.State;
-                                result.ChainErrors |= check.Errors;
-                                text.AppendLine("  Revocation: " + check.State +
-                                    $" (0x{check.Code:X8}; reason {check.Reason})");
-                                if (check.Code != 0) text.AppendLine("  " + new Win32Exception((int)check.Code).Message);
-                                if (check.Crls.Count == 0)
-                                    text.AppendLine("  No CRL context returned (Windows may have used OCSP).");
-
-                                // Include CRLs actually used by Windows without duplicating earlier inspections.
-                                foreach (var bytes in check.Crls)
-                                {
-                                    text.AppendLine("  CRL used by Windows: SHA-256 " +
-                                        CertificateUtilities.Sha256(bytes));
-                                    if (selected && !result.Crls.Any(crl => crl.Encoded.SequenceEqual(bytes)))
-                                        result.Crls.Add(InspectCrl(bytes, "Windows revocation provider",
-                                            certificate, candidates, names));
-                                }
+                                AddCrl(store, inputs, url, bytes);
+                                foreach (var delta in DeltaUrls(certificate.Handle, bytes)) urls.Enqueue(delta);
                             }
                         }
-                        // Combine the trust summary, retrieval notes, and individual CRL findings.
-                        result.Summary = "Revocation: " + result.Revocation + ". Chain: " +
-                            (result.ChainErrors == 0 ? "valid" : result.ChainErrors.ToString()) + ".";
-                        text.AppendLine();
-                        text.AppendLine(notes.ToString());
-                        foreach (var crl in result.Crls) text.AppendLine(crl.Details);
-                        text.AppendLine("CRL entry checks describe individual lists. Windows determines " +
-                            "the combined base/delta revocation result and chain trust.");
-                        text.AppendLine("No entry in one CRL alone does not establish validity.");
-                        result.Report = new TimeReport(result.Summary + "\r\n\r\n").Append(text);
+                        catch (Exception error) { notes.AppendLine(url + "\r\n  " + CaAdministration.Error(error)); }
                     }
-                    return result;
                 }
-                finally { foreach (var issuer in extra) issuer.Dispose(); }
+                // Build the Windows chain using the configured network policy and supplied material.
+                token.ThrowIfCancellationRequested();
+                progress?.Report("Checking the certificate chain and revocation status…");
+                using (var native = BuildChain(certificate, store, offline, timeoutSeconds))
+                using (var chain = new X509Chain(native.DangerousGetHandle()))
+                {
+                    // Capture chain errors and identify the certificate and validation settings.
+                    token.ThrowIfCancellationRequested();
+                    result.ChainErrors = chain.ChainStatus.Aggregate(X509ChainStatusFlags.NoError,
+                        (flags, status) => flags | status.Status);
+                    var text = new TimeReport();
+                    text.AppendLine("Certificate: " + certificate.Subject);
+                    text.AppendLine("Issuer: " + certificate.Issuer);
+                    text.AppendLine("Serial: " + certificate.SerialNumber);
+                    text.AppendLine("SHA-256: " + CertificateUtilities.Sha256(certificate.RawData));
+                    text.Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine();
+                    text.AppendLine("OID Resolution: " + names.Status);
+                    text.AppendLine("Mode: " + (offline ? "Offline / local files and Windows cache" : "Online"));
+                    text.AppendLine("Revocation scope: " +
+                        (entireChain ? "Chain, excluding the root" : "Selected certificate"));
+                    text.AppendLine();
+
+                    // Require a returned chain and explain the limits of revocation evidence.
+                    var context = Read<ChainArray>(native.DangerousGetHandle());
+                    if (context.Count == 0) throw new InvalidOperationException("Windows returned an empty chain.");
+                    result.Revocation = "Not checked";
+                    text.AppendLine("Windows uses its trust stores, supplied certificates/CRLs and cache; " +
+                        "online mode may use OCSP.");
+                    text.AppendLine("A missing, expired or inaccessible CRL is not proof " +
+                        "that a certificate is not revoked.");
+                    text.AppendLine();
+
+                    // Inspect supplied and retrieved CRLs against available issuer certificates.
+                    var candidates = extra.Cast<X509Certificate2>().Concat(
+                        chain.ChainElements.Cast<X509ChainElement>().Select(element => element.Certificate)).ToArray();
+                    foreach (var input in inputs)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        result.Crls.Add(InspectCrl(input.Value, input.Key, certificate, candidates, names));
+                    }
+                    // Walk every returned chain and report each element trust status.
+                    text.AppendLine("WINDOWS CHAIN RESULTS");
+                    for (var chainIndex = 0; chainIndex < context.Count; chainIndex++)
+                    {
+                        var simple = Read<ChainArray>(Marshal.ReadIntPtr(context.Items, chainIndex * IntPtr.Size));
+                        for (var i = 0; i < simple.Count; i++)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            var element = Read<ChainElement>(Marshal.ReadIntPtr(simple.Items, i * IntPtr.Size));
+                            using (var item = new X509Certificate2(element.Certificate))
+                                text.AppendLine(item.Subject + "\r\n  " + (X509ChainStatusFlags)element.Trust.Errors);
+
+                            // Limit revocation checks to the requested scope, excluding a chain root.
+                            var selected = chainIndex == 0 && i == 0;
+                            var root = i == simple.Count - 1 && (element.Trust.Information & 8) != 0;
+                            if ((!entireChain && !selected) || (entireChain && root))
+                            {
+                                text.AppendLine("  Revocation: not checked (outside the selected scope).");
+                                continue;
+                            }
+                            // Check revocation with the next chain element as the candidate issuer.
+                            var issuer = i + 1 < simple.Count ? Read<ChainElement>(
+                                Marshal.ReadIntPtr(simple.Items, (i + 1) * IntPtr.Size)).Certificate : IntPtr.Zero;
+                            var check = CheckRevocation(element.Certificate, issuer,
+                                store, offline, timeoutSeconds);
+                            if (selected) result.Revocation = check.State;
+                            result.ChainErrors |= check.Errors;
+                            text.AppendLine("  Revocation: " + check.State +
+                                $" (0x{check.Code:X8}; reason {check.Reason})");
+                            if (check.Code != 0) text.AppendLine("  " + new Win32Exception((int)check.Code).Message);
+                            if (check.Crls.Count == 0)
+                                text.AppendLine("  No CRL context returned (Windows may have used OCSP).");
+
+                            // Include CRLs actually used by Windows without duplicating earlier inspections.
+                            foreach (var bytes in check.Crls)
+                            {
+                                text.AppendLine("  CRL used by Windows: SHA-256 " +
+                                    CertificateUtilities.Sha256(bytes));
+                                if (selected && !result.Crls.Any(crl => crl.Encoded.SequenceEqual(bytes)))
+                                    result.Crls.Add(InspectCrl(bytes, "Windows revocation provider",
+                                        certificate, candidates, names));
+                            }
+                        }
+                    }
+                    // Combine the trust summary, retrieval notes, and individual CRL findings.
+                    result.Summary = "Revocation: " + result.Revocation + ". Chain: " +
+                        (result.ChainErrors == 0 ? "valid" : result.ChainErrors.ToString()) + ".";
+                    text.AppendLine();
+                    text.AppendLine(notes.ToString());
+                    foreach (var crl in result.Crls) text.AppendLine(crl.Details);
+                    text.AppendLine("CRL entry checks describe individual lists. Windows determines " +
+                        "the combined base/delta revocation result and chain trust.");
+                    text.AppendLine("No entry in one CRL alone does not establish validity.");
+                    result.Report = new TimeReport(result.Summary + "\r\n\r\n").Append(text);
+                }
+                return result;
             }
+            finally { foreach (var issuer in extra) issuer.Dispose(); }
         }
 
         private sealed class RevocationCheck
@@ -247,45 +241,43 @@ namespace Certitude
             bool offline, int timeoutSeconds)
         {
             // Prepare native store and CRL-result buffers for the revocation provider.
-            using (var stores = new NativeBuffer(IntPtr.Size))
-            using (var crlInfo = new NativeBuffer(Marshal.SizeOf<RevocationCrlInfo>()))
+            using var stores = new NativeBuffer(IntPtr.Size);
+            using var crlInfo = new NativeBuffer(Marshal.SizeOf<RevocationCrlInfo>());
+            Marshal.WriteIntPtr(stores.Pointer, store.DangerousGetHandle());
+            Marshal.StructureToPtr(new RevocationCrlInfo { Size = Marshal.SizeOf<RevocationCrlInfo>() },
+                crlInfo.Pointer, false);
+            var options = new RevocationParameters
             {
-                Marshal.WriteIntPtr(stores.Pointer, store.DangerousGetHandle());
-                Marshal.StructureToPtr(new RevocationCrlInfo { Size = Marshal.SizeOf<RevocationCrlInfo>() },
-                    crlInfo.Pointer, false);
-                var options = new RevocationParameters
-                {
-                    Size = Marshal.SizeOf<RevocationParameters>(), Issuer = issuer, StoreCount = 1,
-                    Stores = stores.Pointer, CrlStore = store.DangerousGetHandle(), Timeout = timeoutSeconds * 1000,
-                    CrlInfo = crlInfo.Pointer
-                };
-                var status = new RevocationStatus { Size = Marshal.SizeOf<RevocationStatus>() };
-                try
-                {
-                    // Translate the provider outcome into revoked, not revoked, or unknown status.
-                    var success = CertVerifyRevocation(0x10001, 1, 1, new[] { certificate }, offline ? 6 : 4,
-                        ref options, ref status);
-                    var result = new RevocationCheck { Code = status.Error, Reason = status.Reason };
-                    if (!success && result.Code == 0) result.Code = unchecked((uint)Marshal.GetLastWin32Error());
-                    result.State = success ? "Not revoked" :
-                        result.Code == 0x80092010 ? "Revoked" : "Unknown / unavailable";
-                    if (!success) result.Errors = result.Code == 0x80092010 ? X509ChainStatusFlags.Revoked :
-                        X509ChainStatusFlags.RevocationStatusUnknown;
-                    if (result.Code == 0x80092013) result.Errors |= X509ChainStatusFlags.OfflineRevocation;
+                Size = Marshal.SizeOf<RevocationParameters>(), Issuer = issuer, StoreCount = 1,
+                Stores = stores.Pointer, CrlStore = store.DangerousGetHandle(), Timeout = timeoutSeconds * 1000,
+                CrlInfo = crlInfo.Pointer
+            };
+            var status = new RevocationStatus { Size = Marshal.SizeOf<RevocationStatus>() };
+            try
+            {
+                // Translate the provider outcome into revoked, not revoked, or unknown status.
+                var success = CertVerifyRevocation(0x10001, 1, 1, new[] { certificate }, offline ? 6 : 4,
+                    ref options, ref status);
+                var result = new RevocationCheck { Code = status.Error, Reason = status.Reason };
+                if (!success && result.Code == 0) result.Code = unchecked((uint)Marshal.GetLastWin32Error());
+                result.State = success ? "Not revoked" :
+                    result.Code == 0x80092010 ? "Revoked" : "Unknown / unavailable";
+                if (!success) result.Errors = result.Code == 0x80092010 ? X509ChainStatusFlags.Revoked :
+                    X509ChainStatusFlags.RevocationStatusUnknown;
+                if (result.Code == 0x80092013) result.Errors |= X509ChainStatusFlags.OfflineRevocation;
 
-                    // Copy returned base and delta CRLs before releasing their native contexts.
-                    var info = Read<RevocationCrlInfo>(crlInfo.Pointer);
-                    foreach (var pointer in new[] { info.BaseCrl, info.DeltaCrl })
-                        if (pointer != IntPtr.Zero) result.Crls.Add(Encoded(pointer));
-                    return result;
-                }
-                finally
-                {
-                    // Release every CRL context supplied by the revocation provider.
-                    var info = Read<RevocationCrlInfo>(crlInfo.Pointer);
-                    if (info.BaseCrl != IntPtr.Zero) CertFreeCRLContext(info.BaseCrl);
-                    if (info.DeltaCrl != IntPtr.Zero) CertFreeCRLContext(info.DeltaCrl);
-                }
+                // Copy returned base and delta CRLs before releasing their native contexts.
+                var info = Read<RevocationCrlInfo>(crlInfo.Pointer);
+                foreach (var pointer in new[] { info.BaseCrl, info.DeltaCrl })
+                    if (pointer != IntPtr.Zero) result.Crls.Add(Encoded(pointer));
+                return result;
+            }
+            finally
+            {
+                // Release every CRL context supplied by the revocation provider.
+                var info = Read<RevocationCrlInfo>(crlInfo.Pointer);
+                if (info.BaseCrl != IntPtr.Zero) CertFreeCRLContext(info.BaseCrl);
+                if (info.DeltaCrl != IntPtr.Zero) CertFreeCRLContext(info.DeltaCrl);
             }
         }
 
@@ -319,98 +311,96 @@ namespace Certitude
         {
             // Decode the CRL context and identify its issuer, extensions, and base or delta type.
             names ??= OidNames.Windows;
-            using (var crl = CertCreateCRLContext(1, bytes, bytes.Length))
+            using var crl = CertCreateCRLContext(1, bytes, bytes.Length);
+            if (crl.IsInvalid) throw NativeError();
+            var context = Read<EncodedContext>(crl.DangerousGetHandle());
+            if (context.Size != bytes.Length) throw new CryptographicException("Select a single encoded CRL.");
+            var info = Read<CrlInfo>(context.Info);
+            var extensions = Extensions(info.ExtensionCount, info.Extensions).ToArray();
+            var issuer = new X500DistinguishedName(Bytes(info.Issuer));
+            var number = extensions.FirstOrDefault(extension => extension.Oid.Value == "2.5.29.20");
+            var numberText = "";
+            if (number != null)
             {
-                if (crl.IsInvalid) throw NativeError();
-                var context = Read<EncodedContext>(crl.DangerousGetHandle());
-                if (context.Size != bytes.Length) throw new CryptographicException("Select a single encoded CRL.");
-                var info = Read<CrlInfo>(context.Info);
-                var extensions = Extensions(info.ExtensionCount, info.Extensions).ToArray();
-                var issuer = new X500DistinguishedName(Bytes(info.Issuer));
-                var number = extensions.FirstOrDefault(extension => extension.Oid.Value == "2.5.29.20");
-                var numberText = "";
-                if (number != null)
-                {
-                    // Render the nonnegative CRL number itself rather than Windows' localized field label.
-                    var data = number.RawData;
-                    if (data.Length < 3 || data[0] != 2 || data[1] >= 128 || data[1] != data.Length - 2 ||
-                        (data[2] & 128) != 0) throw new CryptographicException("Invalid CRL number.");
-                    numberText = new BigInteger(data.Skip(2).Reverse().Concat(new byte[1]).ToArray())
-                        .ToString(CultureInfo.InvariantCulture);
-                }
-                var result = new CrlResult
-                {
-                    Source = source, Encoded = bytes, IsDelta = extensions.Any(e => e.Oid.Value == "2.5.29.27"),
-                    Issuer = issuer.Name, EntryCount = info.EntryCount,
-                    ThisUpdate = info.ThisUpdate == 0 ? null : DateTime.FromFileTimeUtc(info.ThisUpdate),
-                    NextUpdate = info.NextUpdate == 0 ? null : DateTime.FromFileTimeUtc(info.NextUpdate),
-                    IssuingDistributionPoint = extensions.FirstOrDefault(e => e.Oid.Value == "2.5.29.28")?.RawData ??
-                        Array.Empty<byte>(),
-                    Number = numberText
-                };
-
-                // Report CRL identity, validity window, entry count, and current freshness.
-                var text = new TimeReport("CRL: " + source + "\r\n");
-                text.AppendLine("  SHA-256: " + CertificateUtilities.Sha256(bytes));
-                text.AppendLine("  Issuer: " + issuer.Name);
-                text.AppendLine("  Type: " + (result.IsDelta ? "Delta (requires a compatible base CRL)" : "Base"));
-                text.AppendLine("  Signature algorithm: " + names.Describe(Marshal.PtrToStringAnsi(info.Signature.Oid), 4));
-                text.Append("  This update: ").AppendTime(result.ThisUpdate).AppendLine();
-                text.Append("  Next update: ").AppendTime(result.NextUpdate).AppendLine();
-                text.AppendLine("  Revoked entries: " + info.EntryCount.ToString("N0", CultureInfo.InvariantCulture));
-                var now = DateTime.UtcNow.ToFileTimeUtc();
-                result.Current = info.ThisUpdate > 0 && info.ThisUpdate <= now && info.NextUpdate > now;
-                text.AppendLine("  Freshness: " +
-                    (result.Current ? "Current" : "Expired, not yet valid, or no next update"));
-                if (certificate != null)
-                {
-                    // Check whether the CRL issuer and distribution-point scope fit the certificate.
-                    result.IssuerMatches = SameName(issuer.RawData, certificate.IssuerName.RawData);
-                    result.ScopeMatches = CertIsValidCRLForCertificate(certificate.Handle,
-                        crl.DangerousGetHandle(), 0, IntPtr.Zero);
-                    text.AppendLine("  Direct issuer match: " + result.IssuerMatches);
-                    text.AppendLine("  Distribution-point scope check: " + result.ScopeMatches);
-
-                    // Locate the certificate serial in this particular CRL.
-                    if (!CertFindCertificateInCRL(certificate.Handle, crl.DangerousGetHandle(), 0,
-                        IntPtr.Zero, out var entry)) throw NativeError();
-                    result.Listed = entry != IntPtr.Zero;
-                    text.AppendLine("  Certificate entry: " + (result.Listed ? "FOUND" : "Not present in this CRL"));
-                    if (result.Listed)
-                    {
-                        // Show the matching entry revocation date and any entry-specific extensions.
-                        var item = Read<CrlEntry>(entry);
-                        text.Append("  Entry revocation date: ").AppendTime(FileTime(item.RevocationDate)).AppendLine();
-                        foreach (var extension in Extensions(item.ExtensionCount, item.Extensions))
-                            text.Append("  Entry " + names.Describe(extension.Oid.Value, 6) + ": ")
-                                .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
-                    }
-                }
-                // Verify signatures even when inspecting a CA's CRL without a particular issued certificate.
-                var signers = (issuers ?? Array.Empty<X509Certificate2>())
-                    .Where(item => SameName(item.SubjectName.RawData, issuer.RawData)).ToArray();
-                var signer = signers.FirstOrDefault(item => CryptVerifyCertificateSignatureEx(IntPtr.Zero, 1, 3,
-                    crl.DangerousGetHandle(), 2, item.Handle, 0, IntPtr.Zero));
-                result.SignatureValid = signers.Length == 0 ? (bool?)null : signer != null;
-                text.AppendLine("  Signature: " + (result.SignatureValid == true ? "Verified" :
-                    result.SignatureValid == false ? "INVALID" : "Unknown — CRL signer certificate not available"));
-                if (signer != null)
-                {
-                    var usage = signer.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();
-                    result.SignerThumbprint = signer.Thumbprint;
-                    result.SignerAllowsCrlSigning = usage == null || (usage.KeyUsages & X509KeyUsageFlags.CrlSign) != 0;
-                    text.AppendLine("  Signer: " + signer.Subject + " (" + signer.Thumbprint + ")");
-                    text.AppendLine("  Signer CRL-sign usage: " +
-                        (result.SignerAllowsCrlSigning == true ? "Allowed" : "NOT allowed"));
-                }
-                // Append decoded CRL extensions to the inspection report.
-                foreach (var extension in extensions)
-                    text.Append("  " + names.Describe(extension.Oid.Value, 6) +
-                        (extension.Critical ? " (Critical)" : "") + ":\r\n")
-                        .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
-                result.Details = text;
-                return result;
+                // Render the nonnegative CRL number itself rather than Windows' localized field label.
+                var data = number.RawData;
+                if (data.Length < 3 || data[0] != 2 || data[1] >= 128 || data[1] != data.Length - 2 ||
+                    (data[2] & 128) != 0) throw new CryptographicException("Invalid CRL number.");
+                numberText = new BigInteger(data.Skip(2).Reverse().Concat(new byte[1]).ToArray())
+                    .ToString(CultureInfo.InvariantCulture);
             }
+            var result = new CrlResult
+            {
+                Source = source, Encoded = bytes, IsDelta = extensions.Any(e => e.Oid.Value == "2.5.29.27"),
+                Issuer = issuer.Name, EntryCount = info.EntryCount,
+                ThisUpdate = FileTime(info.ThisUpdate),
+                NextUpdate = FileTime(info.NextUpdate),
+                IssuingDistributionPoint = extensions.FirstOrDefault(e => e.Oid.Value == "2.5.29.28")?.RawData ??
+                    Array.Empty<byte>(),
+                Number = numberText
+            };
+
+            // Report CRL identity, validity window, entry count, and current freshness.
+            var text = new TimeReport("CRL: " + source + "\r\n");
+            text.AppendLine("  SHA-256: " + CertificateUtilities.Sha256(bytes));
+            text.AppendLine("  Issuer: " + issuer.Name);
+            text.AppendLine("  Type: " + (result.IsDelta ? "Delta (requires a compatible base CRL)" : "Base"));
+            text.AppendLine("  Signature algorithm: " + names.Describe(Marshal.PtrToStringAnsi(info.Signature.Oid), 4));
+            text.Append("  This update: ").AppendTime(result.ThisUpdate).AppendLine();
+            text.Append("  Next update: ").AppendTime(result.NextUpdate).AppendLine();
+            text.AppendLine("  Revoked entries: " + info.EntryCount.ToString("N0", CultureInfo.InvariantCulture));
+            var now = DateTime.UtcNow.ToFileTimeUtc();
+            result.Current = info.ThisUpdate > 0 && info.ThisUpdate <= now && info.NextUpdate > now;
+            text.AppendLine("  Freshness: " +
+                (result.Current ? "Current" : "Expired, not yet valid, or no next update"));
+            if (certificate != null)
+            {
+                // Check whether the CRL issuer and distribution-point scope fit the certificate.
+                result.IssuerMatches = SameName(issuer.RawData, certificate.IssuerName.RawData);
+                result.ScopeMatches = CertIsValidCRLForCertificate(certificate.Handle,
+                    crl.DangerousGetHandle(), 0, IntPtr.Zero);
+                text.AppendLine("  Direct issuer match: " + result.IssuerMatches);
+                text.AppendLine("  Distribution-point scope check: " + result.ScopeMatches);
+
+                // Locate the certificate serial in this particular CRL.
+                if (!CertFindCertificateInCRL(certificate.Handle, crl.DangerousGetHandle(), 0,
+                    IntPtr.Zero, out var entry)) throw NativeError();
+                result.Listed = entry != IntPtr.Zero;
+                text.AppendLine("  Certificate entry: " + (result.Listed ? "FOUND" : "Not present in this CRL"));
+                if (result.Listed)
+                {
+                    // Show the matching entry revocation date and any entry-specific extensions.
+                    var item = Read<CrlEntry>(entry);
+                    text.Append("  Entry revocation date: ").AppendTime(FileTime(item.RevocationDate)).AppendLine();
+                    foreach (var extension in Extensions(item.ExtensionCount, item.Extensions))
+                        text.Append("  Entry " + names.Describe(extension.Oid.Value, 6) + ": ")
+                            .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
+                }
+            }
+            // Verify signatures even when inspecting a CA's CRL without a particular issued certificate.
+            var signers = (issuers ?? Array.Empty<X509Certificate2>())
+                .Where(item => SameName(item.SubjectName.RawData, issuer.RawData)).ToArray();
+            var signer = signers.FirstOrDefault(item => CryptVerifyCertificateSignatureEx(IntPtr.Zero, 1, 3,
+                crl.DangerousGetHandle(), 2, item.Handle, 0, IntPtr.Zero));
+            result.SignatureValid = signers.Length == 0 ? (bool?)null : signer != null;
+            text.AppendLine("  Signature: " + (result.SignatureValid == true ? "Verified" :
+                result.SignatureValid == false ? "INVALID" : "Unknown — CRL signer certificate not available"));
+            if (signer != null)
+            {
+                var usage = signer.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();
+                result.SignerThumbprint = signer.Thumbprint;
+                result.SignerAllowsCrlSigning = usage == null || (usage.KeyUsages & X509KeyUsageFlags.CrlSign) != 0;
+                text.AppendLine("  Signer: " + signer.Subject + " (" + signer.Thumbprint + ")");
+                text.AppendLine("  Signer CRL-sign usage: " +
+                    (result.SignerAllowsCrlSigning == true ? "Allowed" : "NOT allowed"));
+            }
+            // Append decoded CRL extensions to the inspection report.
+            foreach (var extension in extensions)
+                text.Append("  " + names.Describe(extension.Oid.Value, 6) +
+                    (extension.Critical ? " (Critical)" : "") + ":\r\n")
+                    .Append(() => names.FormatExtension(extension).Trim()).AppendLine();
+            result.Details = text;
+            return result;
         }
 
         internal static string[] Urls(IntPtr context, int kind)
@@ -425,41 +415,35 @@ namespace Certitude
                 throw new Win32Exception(error);
             }
             // Retrieve URL pointers into a managed array before freeing the native buffer.
-            using (var buffer = new NativeBuffer(size))
-            {
-                if (!CryptGetObjectUrl(new IntPtr(kind), context, 2, buffer.Pointer, ref size,
-                    IntPtr.Zero, IntPtr.Zero, IntPtr.Zero)) throw NativeError();
-                var array = Read<PointerArray>(buffer.Pointer);
-                return Enumerable.Range(0, array.Count).Select(i =>
-                    Marshal.PtrToStringUni(Marshal.ReadIntPtr(array.Items, i * IntPtr.Size))).ToArray();
-            }
+            using var buffer = new NativeBuffer(size);
+            if (!CryptGetObjectUrl(new IntPtr(kind), context, 2, buffer.Pointer, ref size,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero)) throw NativeError();
+            var array = Read<PointerArray>(buffer.Pointer);
+            return Enumerable.Range(0, array.Count).Select(i =>
+                Marshal.PtrToStringUni(Marshal.ReadIntPtr(array.Items, i * IntPtr.Size))).ToArray();
         }
 
         internal static TimeReport CrlMetadata(byte[] bytes)
         {
             // Read compact CRL size and update metadata for server statistics.
-            using (var crl = CertCreateCRLContext(1, bytes, bytes.Length))
-            {
-                if (crl.IsInvalid) throw NativeError();
-                var context = Read<EncodedContext>(crl.DangerousGetHandle());
-                var info = Read<CrlInfo>(context.Info);
-                return new TimeReport(CaServerStatistics.Size(bytes.Length) + $" / {info.EntryCount:N0} Entries\r\n")
-                    .Append("This Update: ").AppendTime(FileTime(info.ThisUpdate)).AppendLine()
-                    .Append("Next Update: ").AppendTime(FileTime(info.NextUpdate));
-            }
+            using var crl = CertCreateCRLContext(1, bytes, bytes.Length);
+            if (crl.IsInvalid) throw NativeError();
+            var context = Read<EncodedContext>(crl.DangerousGetHandle());
+            var info = Read<CrlInfo>(context.Info);
+            return new TimeReport(CaServerStatistics.Size(bytes.Length) + $" / {info.EntryCount:N0} Entries\r\n")
+                .Append("This Update: ").AppendTime(FileTime(info.ThisUpdate)).AppendLine()
+                .Append("Next Update: ").AppendTime(FileTime(info.NextUpdate));
         }
 
         internal static string[] DeltaUrls(IntPtr certificate, byte[] bytes)
         {
             // Pair the certificate and base CRL when asking Windows for delta locations.
-            using (var crl = CertCreateCRLContext(1, bytes, bytes.Length))
-            using (var pair = new NativeBuffer(IntPtr.Size * 2))
-            {
-                if (crl.IsInvalid) throw NativeError();
-                Marshal.WriteIntPtr(pair.Pointer, certificate);
-                Marshal.WriteIntPtr(pair.Pointer, IntPtr.Size, crl.DangerousGetHandle());
-                return Urls(pair.Pointer, 7);
-            }
+            using var crl = CertCreateCRLContext(1, bytes, bytes.Length);
+            using var pair = new NativeBuffer(IntPtr.Size * 2);
+            if (crl.IsInvalid) throw NativeError();
+            Marshal.WriteIntPtr(pair.Pointer, certificate);
+            Marshal.WriteIntPtr(pair.Pointer, IntPtr.Size, crl.DangerousGetHandle());
+            return Urls(pair.Pointer, 7);
         }
 
         internal static bool SignedBy(X509Certificate2 certificate, X509Certificate2 issuer) =>
@@ -510,14 +494,12 @@ namespace Certitude
         private static bool SameName(byte[] first, byte[] second)
         {
             // Compare encoded distinguished names with Windows certificate name semantics.
-            using (var buffer = new NativeBuffer(first.Length + second.Length))
-            {
-                var left = new Blob { Data = buffer.Pointer, Size = first.Length };
-                var right = new Blob { Data = IntPtr.Add(buffer.Pointer, first.Length), Size = second.Length };
-                Marshal.Copy(first, 0, left.Data, first.Length);
-                Marshal.Copy(second, 0, right.Data, second.Length);
-                return CertCompareCertificateName(1, ref left, ref right);
-            }
+            using var buffer = new NativeBuffer(first.Length + second.Length);
+            var left = new Blob { Data = buffer.Pointer, Size = first.Length };
+            var right = new Blob { Data = IntPtr.Add(buffer.Pointer, first.Length), Size = second.Length };
+            Marshal.Copy(first, 0, left.Data, first.Length);
+            Marshal.Copy(second, 0, right.Data, second.Length);
+            return CertCompareCertificateName(1, ref left, ref right);
         }
         private static byte[] Bytes(Blob blob)
         {

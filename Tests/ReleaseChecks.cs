@@ -64,6 +64,19 @@ namespace Certitude
                     "A PFX concealed inside public certificate armor must be rejected before import.");
             }
 
+            // Cross-certificate pairs preserve direction and reject malformed lengths, members and trailing data.
+            var forward = fixtures["ca"];
+            var reverse = fixtures["sample"];
+            var pair = PublishedDirectory.DecodePair(PublishedDirectory.EncodePair(forward, reverse));
+            Assert(pair[0].SequenceEqual(forward) && pair[1].SequenceEqual(reverse), "Pair directions changed.");
+            pair = PublishedDirectory.DecodePair(PublishedDirectory.EncodePair(null, reverse));
+            Assert(pair[0] == null && pair[1].SequenceEqual(reverse), "A reverse-only certificate pair was lost.");
+            foreach (var malformed in new byte[][] { [0x30, 0], [0x30, 2, 0xa0, 0], [0x30, 0x81, 3, 0xa0, 1, 1],
+                [0x30, 5, 0xa0, 0x82, 0, 1, 1], [0x30, 3, 0xa0, 2, 1], [0x30, 3, 0xa0, 1, 1, 0],
+                [0x30, 6, 0xa1, 1, 1, 0xa0, 1, 1], [0x30, 6, 0xa0, 1, 1, 0xa0, 1, 1] })
+                Reject<ArgumentException>(() => PublishedDirectory.DecodePair(malformed),
+                    "A malformed pair was accepted.");
+
             // File validation and comparison must read identical artifacts across supported text encodings.
             var artifactPath = Path.Combine(output, "artifact.pem");
             using (var rsa = RSA.Create())
@@ -244,6 +257,22 @@ namespace Certitude
             // Render all locally constructible workspaces without showing a window or contacting external services.
             var manager = new CertificateToolsWindow(names: OidNames.Windows);
 
+            // A cancelled export preserves the destination and an accepted export honors the selected format.
+            var exportPath = Path.Combine(output, "selected.pem");
+            File.WriteAllText(exportPath, "Existing content");
+            foreach (var accept in new[] { false, true })
+            {
+                var export = Dialogs.ExportCertificate(window, fixtures["ca"], "certificate.cer");
+                var save = (FilePicker)window.ActivePage;
+                save.FileName = exportPath;
+                save.FilterIndex = 2;
+                save.DialogResult = accept;
+                Complete(export);
+                Assert(accept ? File.ReadAllText(exportPath).StartsWith("-----BEGIN CERTIFICATE-----") &&
+                    CertificateValidation.ReadCertificate(exportPath).SequenceEqual(fixtures["ca"]) :
+                    File.ReadAllText(exportPath) == "Existing content", "The certificate export ignored the picker.");
+            }
+
             // Opening a bundle stays read-only; importing the same file must stop at the review page.
             var bundlePath = Path.Combine(output, "manager.p7b");
             var bundle = new X509Certificate2Collection();
@@ -258,8 +287,7 @@ namespace Certitude
             foreach (var import in new[] { false, true })
             {
                 var previous = Field(manager, "rows");
-                var operation = (Task)typeof(CertificateToolsWindow).GetMethod("OpenFile", Private)
-                    .Invoke(manager, new object[] { import });
+                var operation = (Task)Call(manager, "OpenFile", import);
                 var selected = (FilePicker)window.ActivePage;
                 selected.FileName = bundlePath;
                 selected.DialogResult = true;
@@ -288,11 +316,9 @@ namespace Certitude
             }
             window.ClosePage(manager, null);
             ((TabControl)Field(manager, "tabs")).SelectedIndex = 2;
-            typeof(CertificateToolsWindow).GetField("enrollmentResult", Private).SetValue(manager,
-                new EnrollmentResult { Certificate = fixtures["ca"] });
+            SetField(manager, "enrollmentResult", new EnrollmentResult { Certificate = fixtures["ca"] });
             ((TextBox)Field(manager, "subject")).Clear();
-            Complete((System.Threading.Tasks.Task)typeof(CertificateToolsWindow).GetMethod("CreateCsr", Private)
-                .Invoke(manager, null));
+            Complete((Task)Call(manager, "CreateCsr"));
             Assert(Field(manager, "enrollmentResult") == null &&
                 ((TextBox)Field(manager, "enrollmentOutput")).Text.Contains("Operation failed"),
                 "A failed new enrollment must not leave the previous issued certificate available for export.");
@@ -301,11 +327,11 @@ namespace Certitude
             ((TextBlock)Field(manager, "status")).Text = "Ready.";
             ((TabControl)Field(manager, "tabs")).SelectedIndex = 0;
             var picker = new FilePicker(true) { FileName = "certificate.cer" };
-            typeof(FilePicker).GetField("patterns", Private).SetValue(picker, new[] { "*.cer" });
+            SetField(picker, "patterns", new[] { "*.cer" });
             var formats = (ComboBox)Field(picker, "formats");
             formats.ItemsSource = new[] { "Certificate" };
             formats.SelectedIndex = 0;
-            typeof(FilePicker).GetField("initialized", Private).SetValue(picker, true);
+            SetField(picker, "initialized", true);
             ((TextBox)Field(picker, "folder")).Text = output;
 
             // File checks must lock the selection and restore interaction after either acceptance or failure.
@@ -314,13 +340,13 @@ namespace Certitude
             var selectedName = "selection-" + Guid.NewGuid().ToString("N") + ".cer";
             ((TextBox)Field(picker, "names")).Text = selectedName;
             window.ShowPage(picker);
-            Complete((Task)typeof(FilePicker).GetMethod("Accept", Private).Invoke(picker, null));
+            Complete((Task)Call(picker, "Accept"));
             Assert(disabled && picker.IsEnabled && picker.FileName == Path.Combine(output, selectedName) &&
                 window.ActivePage != picker,
                 "File selection remained editable during acceptance or failed to complete.");
             window.ShowPage(picker);
             ((TextBox)Field(picker, "names")).Text = Path.Combine(selectedName, "missing.cer");
-            Complete((Task)typeof(FilePicker).GetMethod("Accept", Private).Invoke(picker, null));
+            Complete((Task)Call(picker, "Accept"));
             Assert(picker.IsEnabled && window.ActivePage == picker && picker.FileNames.Length == 1 &&
                 picker.FileName == Path.Combine(output, selectedName) &&
                 ((TextBlock)Field(picker, "status")).Text.Contains("destination folder does not exist"),
@@ -329,9 +355,7 @@ namespace Certitude
             ((TextBlock)Field(picker, "status")).Text = "";
             ((TextBox)Field(picker, "names")).Text = "certificate.cer";
             var published = new PublishedPage();
-            typeof(PublishedPage).GetField("initialized", Private).SetValue(published, true);
             var policies = new OidManagerPage();
-            typeof(OidManagerPage).GetField("initialized", Private).SetValue(policies, true);
             var pages = new (string Name, WorkspacePage Page)[]
             {
                 ("file-picker", picker), ("manager", manager), ("validation", new ValidationWindow()),
@@ -392,7 +416,7 @@ namespace Certitude
             window.ClosePage(tablePage, null);
 
             // Exercise the browser's real loading path with local fixtures and render a documentation preview.
-            typeof(MainWindow).GetMethod("ReturnToBrowser", Private).Invoke(window, null);
+            Call(window, "ReturnToBrowser");
             var configuration = @"pki01.example.com\Example Issuing CA";
             var hosts = new[] { "portal", "vpn", "api", "mail", "files", "dc01" };
             var browserRows = Enumerable.Range(1, 18).Select(id => new CertificateRow
@@ -404,10 +428,9 @@ namespace Certitude
                 NotBefore = DateTime.UtcNow.Date.AddDays(-id), NotAfter = DateTime.UtcNow.Date.AddDays(365 - id),
                 SerialNumber = "120000" + id.ToString("X4")
             }).ToArray();
-            typeof(MainWindow).GetField("store", Private).SetValue(window, new FixtureStore(configuration, browserRows));
+            SetField(window, "store", new FixtureStore(configuration, browserRows));
             window.ConfigurationBox.Text = window.TargetText.Text = configuration;
-            Complete((Task)typeof(MainWindow).GetMethod("LoadPage", Private).Invoke(window,
-                new object[] { new QuerySpec { Match = SearchMatch.Contains }, null, 0, true }));
+            Complete((Task)Call(window, "LoadPage", new QuerySpec { Match = SearchMatch.Contains }, null, 0, true));
             Assert(window.Certificates.Items.Count == browserRows.Length && window.ExportButton.IsEnabled &&
                 window.ResultsLoading.Visibility == Visibility.Collapsed,
                 "The browser did not publish its completed page or clear loading state.");

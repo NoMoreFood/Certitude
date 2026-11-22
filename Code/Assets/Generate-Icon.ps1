@@ -3,11 +3,28 @@
 # Licensed under GPLv3. See LICENSE.md.
 #
 
+using namespace System.IO
+using namespace System.Windows
+using namespace System.Windows.Media
+using namespace System.Windows.Media.Imaging
+
 # Load the WPF drawing types and stop if icon generation fails.
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationCore, WindowsBase
 
+function Write-Png([DrawingVisual] $visual, [int] $width, [int] $height, [Stream] $stream)
+{
+    # Rasterize the artwork and keep the bitmap available for the startup image.
+    $bitmap = [RenderTargetBitmap]::new($width, $height, 96, 96, [PixelFormats]::Pbgra32)
+    $bitmap.Render($visual)
+    $encoder = [PngBitmapEncoder]::new()
+    $encoder.Frames.Add([BitmapFrame]::Create($bitmap))
+    $encoder.Save($stream)
+    return $bitmap
+}
+
 # Define the certificate-and-shield artwork in a common 64-pixel coordinate space.
+$brushes = [BrushConverter]::new()
 $shapes = @(
     @('M12 5H39L50 16V53H12Z', '#EAF1F7', '#19384F', 3),
     @('M39 5V16H50', $null, '#19384F', 3),
@@ -19,38 +36,33 @@ $shapes = @(
 # Render a transparent frame for each Windows icon size.
 $frames = foreach ($size in @(16, 24, 32, 48, 64, 128, 256))
 {
-    $visual = [System.Windows.Media.DrawingVisual]::new()
+    $visual = [DrawingVisual]::new()
     $drawing = $visual.RenderOpen()
-    $drawing.PushTransform([System.Windows.Media.ScaleTransform]::new($size / 64.0, $size / 64.0))
+    $drawing.PushTransform([ScaleTransform]::new($size / 64.0, $size / 64.0))
     foreach ($shape in $shapes)
     {
         # Draw each shape with its configured fill and rounded stroke.
-        $fill = if ($shape[1]) { [System.Windows.Media.BrushConverter]::new().ConvertFromString($shape[1]) } else { $null }
-        $stroke = [System.Windows.Media.BrushConverter]::new().ConvertFromString($shape[2])
-        $pen = [System.Windows.Media.Pen]::new($stroke, $shape[3])
-        $pen.StartLineCap = $pen.EndLineCap = [System.Windows.Media.PenLineCap]::Round
-        $pen.LineJoin = [System.Windows.Media.PenLineJoin]::Round
-        $drawing.DrawGeometry($fill, $pen, [System.Windows.Media.Geometry]::Parse($shape[0]))
+        $fill = if ($shape[1]) { $brushes.ConvertFromString($shape[1]) } else { $null }
+        $stroke = $brushes.ConvertFromString($shape[2])
+        $pen = [Pen]::new($stroke, $shape[3])
+        $pen.StartLineCap = $pen.EndLineCap = [PenLineCap]::Round
+        $pen.LineJoin = [PenLineJoin]::Round
+        $drawing.DrawGeometry($fill, $pen, [Geometry]::Parse($shape[0]))
     }
     # Rasterize the scaled artwork and encode the frame as PNG bytes.
     $drawing.Pop()
     $drawing.Close()
-    $bitmap = [System.Windows.Media.Imaging.RenderTargetBitmap]::new($size, $size, 96, 96,
-        [System.Windows.Media.PixelFormats]::Pbgra32)
-    $bitmap.Render($visual)
-    $encoder = [System.Windows.Media.Imaging.PngBitmapEncoder]::new()
-    $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
-    $stream = [System.IO.MemoryStream]::new()
+    $stream = [MemoryStream]::new()
     try
     {
-        $encoder.Save($stream)
+        $bitmap = Write-Png $visual $size $size $stream
         [pscustomobject]@{ Size = $size; Bytes = $stream.ToArray() }
     }
     finally { $stream.Dispose() }
 }
 # Open the icon container that will hold the generated image frames.
-$file = [System.IO.File]::Create((Join-Path $PSScriptRoot 'Certitude.ico'))
-$writer = [System.IO.BinaryWriter]::new($file)
+$file = [File]::Create((Join-Path $PSScriptRoot 'Certitude.ico'))
+$writer = [BinaryWriter]::new($file)
 try
 {
     # Write the ICO header and calculate the first frame payload offset.
@@ -73,33 +85,28 @@ try
 finally { $writer.Dispose() }
 
 # Save the largest frame separately for the application title artwork.
-[System.IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'Certitude.png'), $frames[-1].Bytes)
+[File]::WriteAllBytes((Join-Path $PSScriptRoot 'Certitude.png'), $frames[-1].Bytes)
 
 # Reuse the certificate artwork in a compact native startup screen.
-$visual = [System.Windows.Media.DrawingVisual]::new()
+$visual = [DrawingVisual]::new()
 $drawing = $visual.RenderOpen()
-$background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182D43')
-$muted = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#C4D4E0')
-$drawing.DrawRoundedRectangle($background, $null, [System.Windows.Rect]::new(0, 0, 440, 148), 8, 8)
-$drawing.DrawImage($bitmap, [System.Windows.Rect]::new(28, 34, 80, 80))
+$background = $brushes.ConvertFromString('#182D43')
+$muted = $brushes.ConvertFromString('#C4D4E0')
+$drawing.DrawRoundedRectangle($background, $null, [Rect]::new(0, 0, 440, 148), 8, 8)
+$drawing.DrawImage($bitmap, [Rect]::new(28, 34, 80, 80))
 
 # Render the title and launch message into the image so WPF need not load to display them.
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
-$direction = [System.Windows.FlowDirection]::LeftToRight
-$title = [System.Windows.Media.FormattedText]::new('Certitude', $culture, $direction,
-    [System.Windows.Media.Typeface]::new('Segoe UI Semibold'), 32, [System.Windows.Media.Brushes]::White, 1.0)
-$message = [System.Windows.Media.FormattedText]::new('Starting...', $culture, $direction,
-    [System.Windows.Media.Typeface]::new('Segoe UI'), 15, $muted, 1.0)
-$drawing.DrawText($title, [System.Windows.Point]::new(126, 33))
-$drawing.DrawText($message, [System.Windows.Point]::new(128, 82))
+$direction = [FlowDirection]::LeftToRight
+$title = [FormattedText]::new('Certitude', $culture, $direction,
+    [Typeface]::new('Segoe UI Semibold'), 32, [Brushes]::White, 1.0)
+$message = [FormattedText]::new('Starting...', $culture, $direction,
+    [Typeface]::new('Segoe UI'), 15, $muted, 1.0)
+$drawing.DrawText($title, [Point]::new(126, 33))
+$drawing.DrawText($message, [Point]::new(128, 82))
 $drawing.Close()
 
 # Embed the splash artwork without adding a runtime graphics or font dependency.
-$splash = [System.Windows.Media.Imaging.RenderTargetBitmap]::new(440, 148, 96, 96,
-    [System.Windows.Media.PixelFormats]::Pbgra32)
-$splash.Render($visual)
-$encoder = [System.Windows.Media.Imaging.PngBitmapEncoder]::new()
-$encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($splash))
-$stream = [System.IO.File]::Create((Join-Path $PSScriptRoot 'Certitude-Startup.png'))
-try { $encoder.Save($stream) }
+$stream = [File]::Create((Join-Path $PSScriptRoot 'Certitude-Startup.png'))
+try { $null = Write-Png $visual 440 148 $stream }
 finally { $stream.Dispose() }

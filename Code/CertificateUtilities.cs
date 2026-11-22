@@ -95,10 +95,10 @@ namespace Certitude
             item.Sha256 = Sha256(item.Encoded);
             try
             {
-                using (var rsa = certificate.GetRSAPublicKey())
-                using (var ec = certificate.GetECDsaPublicKey())
-                using (var dsa = certificate.GetDSAPublicKey())
-                    item.KeyBits = rsa?.KeySize ?? ec?.KeySize ?? dsa?.KeySize ?? 0;
+                using var rsa = certificate.GetRSAPublicKey();
+                using var ec = certificate.GetECDsaPublicKey();
+                using var dsa = certificate.GetDSAPublicKey();
+                item.KeyBits = rsa?.KeySize ?? ec?.KeySize ?? dsa?.KeySize ?? 0;
             }
             catch (CryptographicException) { }
 
@@ -173,13 +173,11 @@ namespace Certitude
             // Refresh OID names and read the existing store without retaining native certificates.
             names = names?.Refresh() ?? OidNames.Local;
             token.ThrowIfCancellationRequested();
-            using (var store = new X509Store(name, location))
-            {
-                store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
-                var certificates = store.Certificates;
-                try { return DescribeAll(certificates, token, names); }
-                finally { foreach (var certificate in certificates) certificate.Dispose(); }
-            }
+            using var store = new X509Store(name, location);
+            store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
+            var certificates = store.Certificates;
+            try { return DescribeAll(certificates, token, names); }
+            finally { foreach (var certificate in certificates) certificate.Dispose(); }
         }
 
         internal static byte[] ReadBytes(string path, int maximumMegabytes = 32, CancellationToken token = default)
@@ -250,6 +248,21 @@ namespace Certitude
             return rows.OrderBy(row => row.NotAfter).ToList();
         }
 
+        internal static X509Certificate2 SingleCertificate(byte[] encoded)
+        {
+            // Require one public certificate and transfer ownership only after checking the full input.
+            if (encoded == null || X509Certificate2.GetCertContentType(encoded) != X509ContentType.Cert)
+                throw new ArgumentException("Select a single public certificate in DER or PEM format.");
+            var certificate = new X509Certificate2(encoded);
+            try
+            {
+                if (!certificate.RawData.SequenceEqual(encoded))
+                    throw new ArgumentException("Select a single encoded certificate without trailing data.");
+                return certificate;
+            }
+            catch { certificate.Dispose(); throw; }
+        }
+
         public static byte[] DecodePublicPem(byte[] bytes)
         {
             // Recognize public PEM blocks while rejecting unsupported private-key PEM input.
@@ -286,58 +299,62 @@ namespace Certitude
         {
             // Open the selected destination store for a cancellable import.
             token.ThrowIfCancellationRequested();
-            using (var store = new X509Store(name, location))
+            using var store = new X509Store(name, location);
+            store.Open(OpenFlags.ReadWrite | OpenFlags.OpenExistingOnly);
+            var certificates = new X509Certificate2Collection();
+            var report = new StringBuilder($"Import destination: {location}\\{name}\r\n");
+            try
             {
-                store.Open(OpenFlags.ReadWrite | OpenFlags.OpenExistingOnly);
-                var certificates = new X509Certificate2Collection();
-                var report = new StringBuilder($"Import destination: {location}\\{name}\r\n");
-                try
-                {
-                    // Persist imported keys in the selected user or machine scope.
-                    var flags = X509KeyStorageFlags.PersistKeySet | (location == StoreLocation.LocalMachine ?
-                        X509KeyStorageFlags.MachineKeySet : X509KeyStorageFlags.UserKeySet);
-                    if (exportable) flags |= X509KeyStorageFlags.Exportable;
-                    certificates.Import(DecodePublicPem(bytes), password, flags);
+                // Persist imported keys in the selected user or machine scope.
+                var flags = X509KeyStorageFlags.PersistKeySet | (location == StoreLocation.LocalMachine ?
+                    X509KeyStorageFlags.MachineKeySet : X509KeyStorageFlags.UserKeySet);
+                if (exportable) flags |= X509KeyStorageFlags.Exportable;
+                certificates.Import(DecodePublicPem(bytes), password, flags);
 
-                    // Report each import independently and stop remaining additions on cancellation.
-                    foreach (var certificate in certificates)
+                // Report each import independently and stop remaining additions on cancellation.
+                foreach (var certificate in certificates)
+                {
+                    if (token.IsCancellationRequested)
                     {
-                        if (token.IsCancellationRequested)
-                        {
-                            report.AppendLine("Cancelled; remaining certificates were not added to the store.");
-                            break;
-                        }
-                        try { store.Add(certificate); report.AppendLine(certificate.Thumbprint + ": Imported"); }
-                        catch (Exception error)
-                        {
-                            report.AppendLine(certificate.Thumbprint + ": FAILED — " + CaAdministration.Error(error));
-                        }
+                        report.AppendLine("Cancelled; remaining certificates were not added to the store.");
+                        break;
                     }
-                    return report + "Private keys loaded from PFX are persisted. Service bindings are unchanged.";
+                    try { store.Add(certificate); report.AppendLine(certificate.Thumbprint + ": Imported"); }
+                    catch (Exception error)
+                    {
+                        report.AppendLine(certificate.Thumbprint + ": FAILED — " + CaAdministration.Error(error));
+                    }
                 }
-                finally { foreach (var certificate in certificates) certificate.Dispose(); }
+                return report + "Private keys loaded from PFX are persisted. Service bindings are unchanged.";
             }
+            finally { foreach (var certificate in certificates) certificate.Dispose(); }
         }
+
+        public static void WithCertificate(StoreLocation location, string name, string thumbprint,
+            bool writable, Action<X509Store, X509Certificate2> action) =>
+            WithCertificate(location, name, thumbprint, writable, (store, certificate) =>
+            {
+                action(store, certificate);
+                return 0;
+            });
 
         public static T WithCertificate<T>(StoreLocation location, string name, string thumbprint,
             bool writable, Func<X509Store, X509Certificate2, T> action)
         {
             // Open the requested store with only the access required by the operation.
-            using (var store = new X509Store(name, location))
+            using var store = new X509Store(name, location);
+            store.Open((writable ? OpenFlags.ReadWrite : OpenFlags.ReadOnly) | OpenFlags.OpenExistingOnly);
+            var certificates = store.Certificates;
+            try
             {
-                store.Open((writable ? OpenFlags.ReadWrite : OpenFlags.ReadOnly) | OpenFlags.OpenExistingOnly);
-                var certificates = store.Certificates;
-                try
-                {
-                    // Resolve the certificate by thumbprint immediately before invoking the action.
-                    var certificate = certificates.Cast<X509Certificate2>().FirstOrDefault(item =>
-                        string.Equals(item.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase));
-                    if (certificate == null)
-                        throw new InvalidOperationException("The certificate is no longer in this store. Reload it.");
-                    return action(store, certificate);
-                }
-                finally { foreach (var certificate in certificates) certificate.Dispose(); }
+                // Resolve the certificate by thumbprint immediately before invoking the action.
+                var certificate = certificates.Cast<X509Certificate2>().FirstOrDefault(item =>
+                    string.Equals(item.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase));
+                if (certificate == null)
+                    throw new InvalidOperationException("The certificate is no longer in this store. Reload it.");
+                return action(store, certificate);
             }
+            finally { foreach (var certificate in certificates) certificate.Dispose(); }
         }
 
         public static string Transfer(StoreLocation location, string source, string destination,
@@ -346,49 +363,45 @@ namespace Certitude
             // Require a distinct destination and prepare the certificate transfer report.
             if (string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Choose a different destination store.");
-            using (var target = new X509Store(destination, location))
+            using var target = new X509Store(destination, location);
+            target.Open(OpenFlags.ReadWrite | OpenFlags.OpenExistingOnly);
+            var report = new StringBuilder($"{location}\\{source} → {location}\\{destination}\r\n");
+
+            // Process each distinct certificate independently while honoring cancellation.
+            foreach (var thumbprint in thumbprints.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                target.Open(OpenFlags.ReadWrite | OpenFlags.OpenExistingOnly);
-                var report = new StringBuilder($"{location}\\{source} → {location}\\{destination}\r\n");
-
-                // Process each distinct certificate independently while honoring cancellation.
-                foreach (var thumbprint in thumbprints.Distinct(StringComparer.OrdinalIgnoreCase))
+                if (token.IsCancellationRequested)
+                { report.AppendLine("Cancelled; remaining certificates were not attempted."); break; }
+                try
                 {
-                    if (token.IsCancellationRequested)
-                    { report.AppendLine("Cancelled; remaining certificates were not attempted."); break; }
-                    try
+                    WithCertificate(location, source, thumbprint, move, (store, certificate) =>
                     {
-                        WithCertificate(location, source, thumbprint, move, (store, certificate) =>
+                        // Keep the source when the certificate already exists in the destination.
+                        var existing = target.Certificates;
+                        try
                         {
-                            // Keep the source when the certificate already exists in the destination.
-                            var existing = target.Certificates;
-                            try
-                            {
-                                if (existing.Cast<X509Certificate2>().Any(item => item.Thumbprint == certificate.Thumbprint))
-                                    throw new InvalidOperationException("Already in the destination; source retained.");
-                            }
-                            finally { foreach (var item in existing) item.Dispose(); }
+                            if (existing.Cast<X509Certificate2>().Any(item => item.Thumbprint == certificate.Thumbprint))
+                                throw new InvalidOperationException("Already in the destination; source retained.");
+                        }
+                        finally { foreach (var item in existing) item.Dispose(); }
 
-                            // Verify that the copied certificate retains its private-key association.
-                            target.Add(certificate);
-                            WithCertificate(location, destination, thumbprint, false, (destinationStore, copied) =>
-                            {
-                                if (certificate.HasPrivateKey && !copied.HasPrivateKey)
-                                    throw new InvalidOperationException("Private key association was not retained; source retained.");
-                                return true;
-                            });
-
-                            // Remove the source only after the destination copy has been verified.
-                            if (move) store.Remove(certificate);
-                            return true;
+                        // Verify that the copied certificate retains its private-key association.
+                        target.Add(certificate);
+                        WithCertificate(location, destination, thumbprint, false, (destinationStore, copied) =>
+                        {
+                            if (certificate.HasPrivateKey && !copied.HasPrivateKey)
+                                throw new InvalidOperationException("Private key association was not retained; source retained.");
                         });
-                        report.AppendLine(thumbprint + (move ? ": Moved" : ": Copied"));
-                    }
-                    catch (Exception error)
-                    { report.AppendLine(thumbprint + ": FAILED — " + CaAdministration.Error(error)); }
+
+                        // Remove the source only after the destination copy has been verified.
+                        if (move) store.Remove(certificate);
+                    });
+                    report.AppendLine(thumbprint + (move ? ": Moved" : ": Copied"));
                 }
-                return report.ToString();
+                catch (Exception error)
+                { report.AppendLine(thumbprint + ": FAILED — " + CaAdministration.Error(error)); }
             }
+            return report.ToString();
         }
 
         public static string TestPrivateKey(X509Certificate2 certificate)
@@ -406,15 +419,15 @@ namespace Certitude
             {
                 if (rsa != null)
                 {
-                    using (var publicKey = certificate.GetRSAPublicKey())
-                        matched = publicKey.VerifyData(challenge, rsa.SignData(challenge, HashAlgorithmName.SHA256,
-                            RSASignaturePadding.Pkcs1), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    using var publicKey = certificate.GetRSAPublicKey();
+                    matched = publicKey.VerifyData(challenge, rsa.SignData(challenge, HashAlgorithmName.SHA256,
+                        RSASignaturePadding.Pkcs1), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 }
                 else if (ec != null)
                 {
-                    using (var publicKey = certificate.GetECDsaPublicKey())
-                        matched = publicKey.VerifyData(challenge, ec.SignData(challenge, HashAlgorithmName.SHA256),
-                            HashAlgorithmName.SHA256);
+                    using var publicKey = certificate.GetECDsaPublicKey();
+                    matched = publicKey.VerifyData(challenge, ec.SignData(challenge, HashAlgorithmName.SHA256),
+                        HashAlgorithmName.SHA256);
                 }
                 else throw new NotSupportedException("The access test supports RSA and ECDSA signing keys.");
             }
@@ -510,94 +523,86 @@ namespace Certitude
 
             // Initialize a diagnostic report and a connection deadline linked to cancellation.
             token.ThrowIfCancellationRequested();
+            InventoryCertificate leafInfo = null;
             var result = new TlsProbeResult { PolicyErrors = SslPolicyErrors.RemoteCertificateNotAvailable };
             var report = new TimeReport($"TLS endpoint: {host}:{port}\r\nSNI / expected name: {serverName}\r\n")
                 .Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine()
                 .AppendLine($"Revocation: {(revocation ? "Windows online check" : "NOT CHECKED")}");
-            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(token))
-            using (var client = new TcpClient(Socket.OSSupportsIPv6 ?
-                AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork))
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            using var client = new TcpClient(Socket.OSSupportsIPv6 ?
+                AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork);
+            // Close the socket on cancellation so connection and handshake waits can end.
+            deadline.CancelAfter(TimeSpan.FromSeconds(seconds));
+            using var registration = deadline.Token.Register(client.Close);
+            try
             {
-                // Close the socket on cancellation so connection and handshake waits can end.
-                deadline.CancelAfter(TimeSpan.FromSeconds(seconds));
-                using (deadline.Token.Register(client.Close))
+                // Connect with IPv4 or IPv6 support before starting certificate negotiation.
+                if (client.Client.AddressFamily == AddressFamily.InterNetworkV6) client.Client.DualMode = true;
+                await client.ConnectAsync(host, port).ConfigureAwait(false);
+                report.AppendLine("Connected address: " + client.Client?.RemoteEndPoint);
+                using var ssl = new SslStream(client.GetStream(), false,
+                    (sender, certificate, chain, errors) =>
                 {
-                    try
+                    // Capture the presented certificate and Windows policy result for diagnosis.
+                    result.PolicyErrors = errors;
+                    report.AppendLine("Windows TLS policy: " + errors);
+                    if (certificate != null)
                     {
-                        // Connect with IPv4 or IPv6 support before starting certificate negotiation.
-                        if (client.Client.AddressFamily == AddressFamily.InterNetworkV6) client.Client.DualMode = true;
-                        await client.ConnectAsync(host, port).ConfigureAwait(false);
-                        report.AppendLine("Connected address: " + client.Client?.RemoteEndPoint);
-                        using (var ssl = new SslStream(client.GetStream(), false,
-                            (sender, certificate, chain, errors) =>
+                        result.Certificate = certificate.GetRawCertData();
+                        using var leaf = new X509Certificate2(result.Certificate);
+                        leafInfo = Describe(leaf, names);
+                        report.AppendLine().AppendLine(Details(leafInfo));
+                    }
+                    // Record the Windows-built chain and each element validation result.
+                    if (chain != null)
+                    {
+                        report.AppendLine("Windows-built chain (may include cached/downloaded issuers):");
+                        foreach (var element in chain.ChainElements.Cast<X509ChainElement>())
                         {
-                            // Capture the presented certificate and Windows policy result for diagnosis.
-                            result.PolicyErrors = errors;
-                            report.AppendLine("Windows TLS policy: " + errors);
-                            if (certificate != null)
-                            {
-                                result.Certificate = certificate.GetRawCertData();
-                                using (var leaf = new X509Certificate2(result.Certificate))
-                                    report.AppendLine().AppendLine(Details(Describe(leaf, names)));
-                            }
-                            // Record the Windows-built chain and each element validation result.
-                            if (chain != null)
-                            {
-                                report.AppendLine("Windows-built chain (may include cached/downloaded issuers):");
-                                foreach (var element in chain.ChainElements.Cast<X509ChainElement>())
-                                {
-                                    result.Chain.Add(element.Certificate.RawData);
-                                    report.AppendLine("  " + element.Certificate.Subject);
-                                    foreach (var state in element.ChainElementStatus)
-                                        report.AppendLine("    " + state.Status + ": " +
-                                            state.StatusInformation.Trim());
-                                }
-                            }
-                            // Capture diagnostics while preserving the normal TLS validation decision.
-                            return errors == SslPolicyErrors.None;
-                        }))
-                        {
-                            // Complete the handshake and report the negotiated TLS parameters.
-                            await ssl.AuthenticateAsClientAsync(serverName, new X509CertificateCollection(),
-                                SslProtocols.None, revocation).ConfigureAwait(false);
-                            result.HandshakeCompleted = true;
-                            report.AppendLine($"Negotiated: {ssl.SslProtocol}; " +
-                                $"{ssl.CipherAlgorithm} {ssl.CipherStrength} bits; " +
-                                $"hash {ssl.HashAlgorithm}; exchange {ssl.KeyExchangeAlgorithm}");
+                            result.Chain.Add(element.Certificate.RawData);
+                            report.AppendLine("  " + element.Certificate.Subject);
+                            foreach (var state in element.ChainElementStatus)
+                                report.AppendLine("    " + state.Status + ": " +
+                                    state.StatusInformation.Trim());
                         }
                     }
-                    // .NET Framework EndConnect can throw when cancellation closes its socket concurrently.
-                    catch (Exception error) when (deadline.IsCancellationRequested ||
-                        error is SocketException or IOException or AuthenticationException or
-                            InvalidOperationException or CryptographicException)
-                    {
-                        // Distinguish user cancellation from a timeout or rejected TLS connection.
-                        if (token.IsCancellationRequested) throw new OperationCanceledException(token);
-                        report.AppendLine(deadline.IsCancellationRequested ? "Connection or handshake timed out." :
-                            "TLS connection rejected/failed: " + error.Message);
-                    }
-                    // Compare the presented certificate against the optional expected fingerprint.
-                    token.ThrowIfCancellationRequested();
-                    if (result.Certificate != null && expected.Length > 0)
-                    {
-                        using (var certificate = new X509Certificate2(result.Certificate))
-                        {
-                            var item = Describe(certificate);
-                            result.ExpectedCertificateMatches = expected ==
-                                (expected.Length == 40 ? item.Thumbprint : item.Sha256);
-                            report.AppendLine("Expected certificate thumbprint: " +
-                                (result.ExpectedCertificateMatches.Value ? "MATCH" : "MISMATCH"));
-                        }
-                    }
-                    // Finish the report with the scope of the endpoint check.
-                    report.AppendLine("No application data was sent. Direct TLS only; " +
-                        "STARTTLS and client authentication are not tested.");
-                    report.AppendLine("A certificate installed or renewed in a store " +
-                        "may still require a service binding update.");
-                    result.Report = report;
-                    return result;
-                }
+                    // Capture diagnostics while preserving the normal TLS validation decision.
+                    return errors == SslPolicyErrors.None;
+                });
+                // Complete the handshake and report the negotiated TLS parameters.
+                await ssl.AuthenticateAsClientAsync(serverName, new X509CertificateCollection(),
+                    SslProtocols.None, revocation).ConfigureAwait(false);
+                result.HandshakeCompleted = true;
+                report.AppendLine($"Negotiated: {ssl.SslProtocol}; " +
+                    $"{ssl.CipherAlgorithm} {ssl.CipherStrength} bits; " +
+                    $"hash {ssl.HashAlgorithm}; exchange {ssl.KeyExchangeAlgorithm}");
             }
+            // .NET Framework EndConnect can throw when cancellation closes its socket concurrently.
+            catch (Exception error) when (deadline.IsCancellationRequested ||
+                error is SocketException or IOException or AuthenticationException or
+                    InvalidOperationException or CryptographicException)
+            {
+                // Distinguish user cancellation from a timeout or rejected TLS connection.
+                if (token.IsCancellationRequested) throw new OperationCanceledException(token);
+                report.AppendLine(deadline.IsCancellationRequested ? "Connection or handshake timed out." :
+                    "TLS connection rejected/failed: " + error.Message);
+            }
+            // Compare the presented certificate against the optional expected fingerprint.
+            token.ThrowIfCancellationRequested();
+            if (leafInfo != null && expected.Length > 0)
+            {
+                result.ExpectedCertificateMatches = expected ==
+                    (expected.Length == 40 ? leafInfo.Thumbprint : leafInfo.Sha256);
+                report.AppendLine("Expected certificate thumbprint: " +
+                    (result.ExpectedCertificateMatches.Value ? "MATCH" : "MISMATCH"));
+            }
+            // Finish the report with the scope of the endpoint check.
+            report.AppendLine("No application data was sent. Direct TLS only; " +
+                "STARTTLS and client authentication are not tested.");
+            report.AppendLine("A certificate installed or renewed in a store " +
+                "may still require a service binding update.");
+            result.Report = report;
+            return result;
         }
 
         internal static string Sha256(byte[] bytes)

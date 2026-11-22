@@ -156,7 +156,7 @@ namespace Certitude
             panel.Children.Add(read);
             Action(read, "CA _information", async () =>
             {
-                var text = await ForAuthorities(config => CaAdministration.Use(config, admin =>
+                var text = await ForAuthorities(config => CaAdministration.Use(admin =>
                 {
                     // Read supported CA properties independently so unavailable values remain visible.
                     var result = new TimeReport();
@@ -191,8 +191,8 @@ namespace Certitude
                 // Fetch the CA certificate before opening its decoded details.
                 var bytes = await Task.Run(() =>
                 {
-                    using (var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request"))
-                        return Convert.FromBase64String(request.Value.GetCACertificate(0, config, 1));
+                    using var request = ComScope<ICertRequest>.Create("CertificateAuthority.Request");
+                    return Convert.FromBase64String(request.Value.GetCACertificate(0, config, 1));
                 });
                 await Dialogs.Certificate(this, bytes, await Task.Run(() => oidNames.Value.Refresh()), false);
                 Done("CA certificate loaded.");
@@ -202,18 +202,14 @@ namespace Certitude
                 // Read database column types and indexing information on a worker thread.
                 var text = await ForAuthorities(config =>
                 {
-                    using (var view = ComScope<ICertView>.Create("CertificateAuthority.View"))
-                    {
-                        view.Value.OpenConnection(config);
-                        using (var columns = new ComScope<ICertViewColumn>(view.Value.EnumCertViewColumn(0)))
-                        {
-                            var result = new StringBuilder("Name\tType\tIndexed\r\n");
-                            while (columns.Value.Next() >= 0)
-                                result.AppendLine($"{columns.Value.GetName()}\t{columns.Value.GetType()}\t" +
-                                    $"{columns.Value.IsIndexed() != 0}");
-                            return new TimeReport(result.ToString());
-                        }
-                    }
+                    using var view = ComScope<ICertView>.Create("CertificateAuthority.View");
+                    view.Value.OpenConnection(config);
+                    using var columns = new ComScope<ICertViewColumn>(view.Value.EnumCertViewColumn(0));
+                    var result = new StringBuilder("Name\tType\tIndexed\r\n");
+                    while (columns.Value.Next() >= 0)
+                        result.AppendLine($"{columns.Value.GetName()}\t{columns.Value.GetType()}\t" +
+                            $"{columns.Value.IsIndexed() != 0}");
+                    return new TimeReport(result.ToString());
                 });
 
                 // Present the completed schema report in the workspace.
@@ -248,8 +244,7 @@ namespace Certitude
                     var open = new FilePicker() { Filter = "Certificate|*.cer;*.crt;*.pem|All files|*.*" };
                     if (await open.ShowAsync() != true ||
                         !await Confirm("Import certificate into the CA database", open.FileName)) return;
-                    var id = await Task.Run(() => CaAdministration.Use(config,
-                        admin => admin.ImportCertificate(config,
+                    var id = await Task.Run(() => CaAdministration.Use(admin => admin.ImportCertificate(config,
                             Convert.ToBase64String(CertificateUtilities.ReadEncoded(open.FileName)), 1)));
                     Done("Imported certificate as request " + id + ".");
                 });
@@ -259,11 +254,8 @@ namespace Certitude
             Dialogs.Note(panel, "Certificate revocation lists");
             var crls = new WrapPanel();
             panel.Children.Add(crls);
-            Action(crls, allAuthorities ? "Generate / publish _CRLs…" : "Generate / publish / export _CRLs…", () =>
-            {
-                tabs.SelectedIndex = 1;
-                return Task.CompletedTask;
-            });
+            Dialogs.Button(crls, allAuthorities ? "Generate / publish _CRLs…" : "Generate / publish / export _CRLs…",
+                () => tabs.SelectedIndex = 1);
 
             // Expose Certificate Services status and lifecycle operations.
             Dialogs.Note(panel, "Certificate Services");
@@ -342,8 +334,8 @@ namespace Certitude
             Action(controls, "Publication _status…", async () =>
             {
                 // Read and display the CA-reported CRL publication status.
-                var report = await ForAuthorities(config => new TimeReport(CaAdministration.Use(config,
-                    admin => CaAdministration.CrlPublicationStatus(config, admin))));
+                var report = await ForAuthorities(config => new TimeReport(CaAdministration.Use(admin =>
+                    CaAdministration.CrlPublicationStatus(config, admin))));
                 Done("CRL publication status collected. Review the report for errors or skipped CAs.");
                 record(report);
                 Dialogs.Report(this, "CRL publication status", report);
@@ -386,8 +378,8 @@ namespace Certitude
                 // Choose an output file and save the requested base or delta CRL.
                 var number = int.Parse(index.Text, CultureInfo.InvariantCulture);
                 var delta = exportKind.SelectedIndex == 1;
-                var save = new FilePicker(true) { FileName = delta ? "delta.crl" : "base.crl", Filter = "CRL|*.crl" };
-                if (await save.ShowAsync() != true) return;
+                var save = await FilePicker.ChooseSave(this, delta ? "delta.crl" : "base.crl", "CRL|*.crl");
+                if (save == null) return;
                 await Task.Run(() => CertificateUtilities.WriteAtomic(save.FileName,
                     CaAdministration.ReadCrl(config, delta, number)));
                 Done("CRL saved to " + save.FileName);
@@ -423,7 +415,7 @@ namespace Certitude
                 // Read the property using the type reported by the CA.
                 var id = int.Parse(property.Text);
                 var number = int.Parse(index.Text);
-                var result = await Task.Run(() => CaAdministration.Use(config, admin =>
+                var result = await Task.Run(() => CaAdministration.Use(admin =>
                 {
                     var flags = admin.GetCAPropertyFlags(config, id);
                     return new
@@ -450,11 +442,10 @@ namespace Certitude
 
                 // Confirm the property change before marshaling its typed value to the CA.
                 if (!await Confirm("Set CA property " + id + " at index " + number, value.Text)) return;
-                await Task.Run(() => CaAdministration.Use(config, admin =>
+                await Task.Run(() => CaAdministration.Use(admin =>
                 {
-                    using (var variant = new VariantValue(data))
-                        admin.SetCAProperty(config, id, number, kind, variant.Pointer);
-                    return 0;
+                    using var variant = new VariantValue(data);
+                    admin.SetCAProperty(config, id, number, kind, variant.Pointer);
                 }));
                 Done("CA property " + id + " updated.");
             });
@@ -490,8 +481,8 @@ namespace Certitude
                 // Read a configuration entry and select the editor type from its returned value.
                 var path = node.Text.Trim();
                 var entry = name.Text.Trim();
-                var data = await Task.Run(() => CaAdministration.Use(config,
-                    admin => admin.GetConfigEntry(config, path, entry)));
+                var data = await Task.Run(() => CaAdministration.Use(admin =>
+                    admin.GetConfigEntry(config, path, entry)));
                 type.SelectedIndex = data switch { int => 0, DateTime => 1, byte[] => 2, Array => 4, _ => 3 };
                 value.Text = data is Array array and not byte[] ?
                     string.Join(Environment.NewLine, array.Cast<object>().Select(CertificateStore.Format)) :
@@ -506,11 +497,10 @@ namespace Certitude
                 var data = CaAdministration.ParseValue(value.Text, type.SelectedIndex + 1);
                 if (entry.Length == 0) throw new ArgumentException("Enter a configuration entry name.");
                 if (!await Confirm("Write " + path + "\\" + entry, value.Text)) return;
-                await Task.Run(() => CaAdministration.Use(config, admin =>
+                await Task.Run(() => CaAdministration.Use(admin =>
                 {
-                    using (var variant = new VariantValue(data, binaryString: false))
-                        admin.SetConfigEntry(config, path, entry, variant.Pointer);
-                    return 0;
+                    using var variant = new VariantValue(data, binaryString: false);
+                    admin.SetConfigEntry(config, path, entry, variant.Pointer);
                 }));
                 Done("Configuration updated. Restart Certificate Services if the setting requires it.");
             });
@@ -538,8 +528,8 @@ namespace Certitude
             Action(buttons, "_Load templates", async () =>
             {
                 // Decode the CA template list into editable short names.
-                original = await Task.Run(() => CaAdministration.Use(config,
-                    admin => Convert.ToString(admin.GetCAProperty(config, 29, 0, 4, 1), CultureInfo.InvariantCulture)));
+                original = await Task.Run(() => CaAdministration.Use(admin =>
+                    Convert.ToString(admin.GetCAProperty(config, 29, 0, 4, 1), CultureInfo.InvariantCulture)));
                 var entries = original.Replace("\r", "").Split('\n');
                 names.Text = string.Join(Environment.NewLine,
                     entries.Where((entry, i) => i % 2 == 0 && entry.Length > 0));
@@ -561,15 +551,15 @@ namespace Certitude
                 var data = string.Concat(entries.Select(name => name + "\n\n"));
                 if (!await Confirm("Replace this CA's published template list",
                     string.Join(Environment.NewLine, entries))) return;
-                await Task.Run(() => CaAdministration.Use(config, admin =>
+                await Task.Run(() => CaAdministration.Use(admin =>
                 {
                     // Reject concurrent template changes before replacing the saved baseline.
                     var current = Convert.ToString(admin.GetCAProperty(config, 29, 0, 4, 1),
                         CultureInfo.InvariantCulture);
                     if (current != original)
                         throw new InvalidOperationException("Templates changed on the CA. Reload before saving.");
-                    using (var variant = new VariantValue(data)) admin.SetCAProperty(config, 29, 0, 4, variant.Pointer);
-                    return 0;
+                    using var variant = new VariantValue(data);
+                    admin.SetCAProperty(config, 29, 0, 4, variant.Pointer);
                 }));
 
                 // Require another load before any further template edits can be saved.

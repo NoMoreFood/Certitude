@@ -26,7 +26,6 @@ namespace Certitude
         private readonly DataGrid states, expiry, templates, requesters, requests, types, months;
         private readonly DataGrid authority, server, storage, files;
         private CancellationTokenSource cancellation;
-        private bool initialized;
         private string recordsError;
         private bool IsBusy => cancellation != null;
         private CaStatistics Snapshot { get; set; }
@@ -131,12 +130,7 @@ namespace Certitude
                 "Certificate Payload Size Or Reclaimable Space. Folder Totals May Include Unrelated Files.", 320);
 
             // Start collection once and request cancellation before leaving a busy page.
-            Loaded += async (sender, e) =>
-            {
-                if (initialized) return;
-                initialized = true;
-                await Refresh();
-            };
+            OnFirstLoad(Refresh);
             Closing += (sender, e) =>
             {
                 if (!IsBusy) return;
@@ -160,30 +154,29 @@ namespace Certitude
             status.Text = "Reading The Entire CA And Server Metadata…";
 
             // Collect record aggregates and server metadata concurrently under one cancellation token.
-            using (cancellation = new CancellationTokenSource())
+            using var request = new CancellationTokenSource();
+            cancellation = request;
+            try
             {
-                try
-                {
-                    await Task.WhenAll(LoadRecords(cancellation.Token), LoadServer(cancellation.Token));
-                    TimeDisplay.Text(status, () => Snapshot == null ?
-                        "Record Statistics Unavailable — " + recordsError :
-                        $"{Snapshot.Total:N0} Records · {Snapshot.TemplateCount:N0} Template Groups · " +
-                        $"{Snapshot.RequesterCount:N0} Requester Groups · Scan {Snapshot.Elapsed.TotalSeconds:N2}s · " +
-                        "As Of " + CaServerStatistics.Date(Snapshot.AsOf) + " · " + store.SearchStatus);
-                }
-                catch (OperationCanceledException)
-                {
-                    status.Text = "Collection Cancelled. Completed Sections Remain Visible; Refresh To Collect Again.";
-                }
-                catch (Exception error) { status.Text = "Statistics Unavailable — " + CaAdministration.Error(error); }
-                finally
-                {
-                    // Restore controls and mark any unfinished summary cards as unavailable.
-                    cancellation = null;
-                    refresh.IsEnabled = true;
-                    cancel.IsEnabled = false;
-                    foreach (var card in cards) if (card.Text == "…") card.Text = "Unavailable";
-                }
+                await Task.WhenAll(LoadRecords(request.Token), LoadServer(request.Token));
+                TimeDisplay.Text(status, () => Snapshot == null ?
+                    "Record Statistics Unavailable — " + recordsError :
+                    $"{Snapshot.Total:N0} Records · {Snapshot.TemplateCount:N0} Template Groups · " +
+                    $"{Snapshot.RequesterCount:N0} Requester Groups · Scan {Snapshot.Elapsed.TotalSeconds:N2}s · " +
+                    "As Of " + TimeDisplay.Stamp(Snapshot.AsOf) + " · " + store.SearchStatus);
+            }
+            catch (OperationCanceledException)
+            {
+                status.Text = "Collection Cancelled. Completed Sections Remain Visible; Refresh To Collect Again.";
+            }
+            catch (Exception error) { status.Text = "Statistics Unavailable — " + CaAdministration.Error(error); }
+            finally
+            {
+                // Restore controls and mark any unfinished summary cards as unavailable.
+                cancellation = null;
+                refresh.IsEnabled = true;
+                cancel.IsEnabled = false;
+                foreach (var card in cards) if (card.Text == "…") card.Text = "Unavailable";
             }
         }
 
@@ -292,13 +285,10 @@ namespace Certitude
         private static void Column(DataGrid grid, string title, string field, double width, string format = null)
         {
             // Use wrapping cells and headers to keep long metric values readable.
-            var text = new Style(typeof(TextBlock));
-            text.Setters.Add(new Setter(TextBlock.TextWrappingProperty, TextWrapping.Wrap));
-            text.Setters.Add(new Setter(FrameworkElement.MarginProperty, new Thickness(0, 3, 0, 3)));
             grid.Columns.Add(new DataGridTextColumn { Header = title,
                 Binding = new Binding(field) { StringFormat = format },
                 Width = new DataGridLength(width, DataGridLengthUnitType.Star), MinWidth = 45,
-                ElementStyle = text,
+                ElementStyle = (Style)Application.Current.FindResource("StatisticsCellText"),
                 HeaderStyle = (Style)Application.Current.FindResource("DetailsColumnHeaderStyle") });
         }
 

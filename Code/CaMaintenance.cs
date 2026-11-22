@@ -89,9 +89,9 @@ namespace Certitude
                     "The selection must match this machine's active CA.");
 
             // Require elevation for changes to local CA files or service configuration.
-            using (var identity = WindowsIdentity.GetCurrent())
-                if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
-                    throw new InvalidOperationException("Run Certitude as administrator for local CA maintenance.");
+            using var identity = WindowsIdentity.GetCurrent();
+            if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+                throw new InvalidOperationException("Run Certitude as administrator for local CA maintenance.");
         }
 
         public static MaintenancePlan Prepare(MaintenanceOperation operation, string configuration, string folder)
@@ -116,8 +116,7 @@ namespace Certitude
             using (var service = new ServiceController("CertSvc"))
                 if (service.Status != ServiceControllerStatus.Running)
                     throw new InvalidOperationException("Start Certificate Services before preparing this operation.");
-            var name = CaAdministration.Use(configuration,
-                admin => Convert.ToString(admin.GetCAProperty(configuration, 7, 0, 4, 0)));
+            var name = CaAdministration.Use(admin => Convert.ToString(admin.GetCAProperty(configuration, 7, 0, 4, 0)));
             if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
                 throw new InvalidOperationException("The CA did not return a valid database name.");
 
@@ -138,7 +137,7 @@ namespace Certitude
             // Include database size and expected downtime in the maintenance confirmation.
             plan.Review += "\r\n\r\nActive Database:\r\n" + plan.Database + "\r\nCurrent Size: " +
                 CaServerStatistics.Size(new FileInfo(plan.Database).Length);
-            if (operation == MaintenanceOperation.Compact || operation == MaintenanceOperation.Integrity)
+            if (operation is MaintenanceOperation.Compact or MaintenanceOperation.Integrity)
                 plan.Review += "\r\n\r\nCA Downtime: Certificate Services will be temporarily disabled and stopped. " +
                     "Its startup mode and running state will be restored afterward. " +
                     "Wait for maintenance to finish before closing Certitude.";
@@ -154,11 +153,9 @@ namespace Certitude
             needs[outputDrive] = 256L * 1024 * 1024;
             if (plan.Operation != MaintenanceOperation.Integrity)
             {
-                using (var key = Registry.LocalMachine.OpenSubKey(ConfigurationKey))
-                {
-                    var logs = Convert.ToString(key?.GetValue("DBLogDirectory"));
-                    needs[outputDrive] += size + new DirectoryInfo(logs).EnumerateFiles("*.log").Sum(file => file.Length);
-                }
+                using var key = Registry.LocalMachine.OpenSubKey(ConfigurationKey);
+                var logs = Convert.ToString(key?.GetValue("DBLogDirectory"));
+                needs[outputDrive] += size + new DirectoryInfo(logs).EnumerateFiles("*.log").Sum(file => file.Length);
             }
             // Account for the original copy and compaction workspace even when both share a volume.
             if (plan.Operation == MaintenanceOperation.Compact)
@@ -218,7 +215,7 @@ namespace Certitude
                 var installed = store.Certificates;
                 try
                 {
-                    var signing = CaAdministration.Use(plan.Configuration, admin =>
+                    var signing = CaAdministration.Use(admin =>
                     {
                         var certificates = new X509Certificate2Collection();
                         var count = CaAdministration.SigningCertificateCount(plan.Configuration, admin);
@@ -248,7 +245,7 @@ namespace Certitude
             }
 
             // Complete the online database backup with the chosen log retention policy.
-            if (plan.Operation != MaintenanceOperation.Configuration && plan.Operation != MaintenanceOperation.Integrity)
+            if (plan.Operation is not (MaintenanceOperation.Configuration or MaintenanceOperation.Integrity))
             {
                 output("Creating Online Backup…");
                 var logs = plan.Operation == MaintenanceOperation.BackupAndLogs ? "" : " KeepLog";
@@ -294,86 +291,80 @@ namespace Certitude
         private static void WithOfflineService(string configuration, Action<string> output, Action operation)
         {
             ValidateLocalTarget(configuration);
-            using (var service = new ServiceController("CertSvc"))
-            using (var key = Registry.LocalMachine.OpenSubKey(ServiceKey))
+            using var service = new ServiceController("CertSvc");
+            using var key = Registry.LocalMachine.OpenSubKey(ServiceKey);
+            // Capture running and startup states so maintenance can restore them after failure.
+            var running = service.Status == ServiceControllerStatus.Running;
+            if (!running && service.Status != ServiceControllerStatus.Stopped)
+                throw new InvalidOperationException("Wait for Certificate Services to finish changing state.");
+            var start = Convert.ToInt32(key.GetValue("Start"));
+            var delayedValue = key.GetValue("DelayedAutoStart");
+            var delayed = Convert.ToInt32(delayedValue ?? 0) != 0;
+            var mode = start == 2 ? delayed ? "delayed-auto" : "auto" : start == 3 ? "demand" : "disabled";
+            if (start < 2 || start > 4) throw new InvalidOperationException("Unsupported Certificate Services startup mode.");
+            Exception failure = null;
+            try
             {
-                // Capture running and startup states so maintenance can restore them after failure.
-                var running = service.Status == ServiceControllerStatus.Running;
-                if (!running && service.Status != ServiceControllerStatus.Stopped)
-                    throw new InvalidOperationException("Wait for Certificate Services to finish changing state.");
-                var start = Convert.ToInt32(key.GetValue("Start"));
-                var delayedValue = key.GetValue("DelayedAutoStart");
-                var delayed = Convert.ToInt32(delayedValue ?? 0) != 0;
-                var mode = start == 2 ? delayed ? "delayed-auto" : "auto" : start == 3 ? "demand" : "disabled";
-                if (start < 2 || start > 4) throw new InvalidOperationException("Unsupported Certificate Services startup mode.");
-                Exception failure = null;
+                // Prevent restarts while the operation has exclusive access to the database.
+                output("Temporarily Disabling And Stopping Certificate Services…");
+                RunTool("sc.exe", "config CertSvc start= disabled", output);
+                if (running) service.Stop();
+                service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(60));
+                operation();
+            }
+            catch (Exception error) { failure = error; }
+            finally
+            {
                 try
                 {
-                    // Prevent restarts while the operation has exclusive access to the database.
-                    output("Temporarily Disabling And Stopping Certificate Services…");
-                    RunTool("sc.exe", "config CertSvc start= disabled", output);
-                    if (running) service.Stop();
-                    service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(60));
-                    operation();
-                }
-                catch (Exception error) { failure = error; }
-                finally
-                {
-                    try
+                    // Restore startup mode and running state even after an offline failure.
+                    RunTool("sc.exe", "config CertSvc start= " + (running && start == 4 ? "demand" : mode), output);
+                    try { if (running) output(CaAdministration.Service(configuration, "Start")); }
+                    finally
                     {
-                        // Restore startup mode and running state even after an offline failure.
-                        RunTool("sc.exe", "config CertSvc start= " + (running && start == 4 ? "demand" : mode), output);
-                        try { if (running) output(CaAdministration.Service(configuration, "Start")); }
-                        finally
-                        {
-                            if (running && start == 4) RunTool("sc.exe", "config CertSvc start= disabled", output);
+                        if (running && start == 4) RunTool("sc.exe", "config CertSvc start= disabled", output);
 
-                            // SC can clear the delayed-start flag while changing the startup type.
-                            using (var settings = Registry.LocalMachine.OpenSubKey(ServiceKey, true))
-                            {
-                                if (delayedValue == null) settings.DeleteValue("DelayedAutoStart", false);
-                                else settings.SetValue("DelayedAutoStart", delayedValue, RegistryValueKind.DWord);
-                            }
-                        }
-                        output("Certificate Services State Restored: " + (running ? "Running" : "Stopped") + " / " + mode);
+                        // SC can clear the delayed-start flag while changing the startup type.
+                        using var settings = Registry.LocalMachine.OpenSubKey(ServiceKey, true);
+                        if (delayedValue == null) settings.DeleteValue("DelayedAutoStart", false);
+                        else settings.SetValue("DelayedAutoStart", delayedValue, RegistryValueKind.DWord);
                     }
-                    catch (Exception error)
-                    {
-                        // Preserve both failures and the original service state for manual recovery.
-                        failure = new InvalidOperationException((failure == null ? "" : failure.Message + "\r\n") +
-                            "Could not restore Certificate Services. Original state: " +
-                            (running ? "Running" : "Stopped") + " / " + mode + ". " + error.Message, error);
-                    }
+                    output("Certificate Services State Restored: " + (running ? "Running" : "Stopped") + " / " + mode);
                 }
-                if (failure != null) throw new InvalidOperationException("CA maintenance failed. " + failure.Message, failure);
+                catch (Exception error)
+                {
+                    // Preserve both failures and the original service state for manual recovery.
+                    failure = new InvalidOperationException((failure == null ? "" : failure.Message + "\r\n") +
+                        "Could not restore Certificate Services. Original state: " +
+                        (running ? "Running" : "Stopped") + " / " + mode + ". " + error.Message, error);
+                }
             }
+            if (failure != null) throw new InvalidOperationException("CA maintenance failed. " + failure.Message, failure);
         }
 
         internal static void RunTool(string tool, string arguments, Action<string> output)
         {
             // Launch the selected Windows tool with hidden, redirected process streams.
-            using (var process = new Process { StartInfo = new ProcessStartInfo
+            using var process = new Process { StartInfo = new ProcessStartInfo
             {
                 FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), tool),
                 Arguments = arguments, UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true
-            } })
-            {
-                // Forward both output streams and prevent waits for interactive input.
-                process.OutputDataReceived += (sender, e) => { if (e.Data != null) output(e.Data); };
-                process.ErrorDataReceived += (sender, e) => { if (e.Data != null) output(e.Data); };
-                output("Running " + tool + "…");
-                process.Start();
-                process.StandardInput.Close();
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-                process.WaitForExit();
+            } };
+            // Forward both output streams and prevent waits for interactive input.
+            process.OutputDataReceived += (sender, e) => { if (e.Data != null) output(e.Data); };
+            process.ErrorDataReceived += (sender, e) => { if (e.Data != null) output(e.Data); };
+            output("Running " + tool + "…");
+            process.Start();
+            process.StandardInput.Close();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
 
-                // Report a nonzero native exit code after collecting diagnostic output.
-                if (process.ExitCode != 0)
-                    throw new InvalidOperationException(tool + " failed with exit code 0x" + process.ExitCode.ToString("X8") +
-                        ". See the operation output above.");
-            }
+            // Report a nonzero native exit code after collecting diagnostic output.
+            if (process.ExitCode != 0)
+                throw new InvalidOperationException(tool + " failed with exit code 0x" + process.ExitCode.ToString("X8") +
+                    ". See the operation output above.");
         }
     }
 }

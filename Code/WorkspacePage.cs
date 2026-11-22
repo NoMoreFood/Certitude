@@ -86,6 +86,13 @@ namespace Certitude
         public event CancelEventHandler Closing;
         internal event Action<bool> TimeChanged;
         internal void RefreshTimes(bool previousUtc) => TimeChanged?.Invoke(previousUtc);
+        protected void OnFirstLoad(Func<Task> load)
+        {
+            // Detach before awaiting so navigation back to the page cannot start a second load.
+            async void FirstLoad(object sender, RoutedEventArgs e) { Loaded -= FirstLoad; await load(); }
+            Loaded += FirstLoad;
+        }
+
         public async Task<bool?> ShowAsync()
         {
             // Await an inline page result while temporarily restoring the input cursor.
@@ -114,6 +121,68 @@ namespace Certitude
         internal void Complete(bool? result) => completion.TrySetResult(result);
     }
 
+    internal abstract class DirectoryPage(Action<string> log) : WorkspacePage
+    {
+        protected readonly DockPanel layout = new DockPanel { Margin = new Thickness(8) };
+        protected readonly TextBox server = new TextBox { Width = 360, Margin = new Thickness(0, 0, 8, 4) };
+        protected readonly TextBlock target = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        protected readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        protected void Record(string message) => log?.Invoke(message);
+        internal bool IsBusy
+        {
+            get;
+            private set { field = value; layout.IsEnabled = !value; }
+        }
+
+        protected StackPanel DirectoryHeader(string note, Func<Task> connect)
+        {
+            // Keep directory discovery beside its input and make the forest-wide result scope explicit.
+            var header = new StackPanel();
+            DockPanel.SetDock(header, Dock.Top);
+            layout.Children.Add(header);
+            Dialogs.Note(header, note);
+            var label = Glyphs.Label("Domain / Domain Controller (Blank = Automatic)");
+            label.Target = server;
+            header.Children.Add(label);
+            var connection = new WrapPanel();
+            connection.Children.Add(server);
+            Dialogs.Button(connection, "_Load Directory", async () => await connect());
+            header.Children.Add(connection);
+            var scope = new TextBlock { Text = "Forest-Wide Results", FontSize = 10,
+                Margin = new Thickness(0, 0, 0, 4) };
+            scope.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+            header.Children.Add(scope);
+            header.Children.Add(target);
+            server.KeyDown += async (sender, e) =>
+            {
+                if (e.Key != Key.Enter) return;
+                e.Handled = true;
+                await connect();
+            };
+            Closing += (sender, e) => e.Cancel = IsBusy;
+            return header;
+        }
+
+        protected abstract void SelectionChanged();
+
+        protected async Task Run(string message, Func<Task> action)
+        {
+            // Serialize directory work and restore interaction and selection on every exit.
+            if (IsBusy) return;
+            using var cursor = BusyCursor.Enter();
+            IsBusy = true;
+            status.Text = message;
+            try { await action(); }
+            catch (Exception error) { status.Text = CaAdministration.Error(error); }
+            finally
+            {
+                IsBusy = false;
+                SelectionChanged();
+                Record(status.Text);
+            }
+        }
+    }
+
     internal sealed class FilePicker : WorkspacePage
     {
         private readonly bool save;
@@ -131,6 +200,12 @@ namespace Certitude
         public string[] FileNames { get; private set; } = Array.Empty<string>();
         public int FilterIndex { get; set; } = 1;
         public bool Multiselect { get; set; }
+
+        public static async Task<FilePicker> ChooseSave(DependencyObject owner, string fileName, string filter)
+        {
+            var picker = new FilePicker(true) { Owner = owner, FileName = fileName, Filter = filter };
+            return await picker.ShowAsync() == true ? picker : null;
+        }
 
         public FilePicker(bool save = false)
         {
@@ -200,8 +275,7 @@ namespace Certitude
             files.MouseDoubleClick += async (sender, e) =>
             {
                 // Open folders on double-click and accept files only when a real row was clicked.
-                if (files.SelectedItem is not FileChoice item ||
-                    ItemsControl.ContainerFromElement(files, e.OriginalSource as DependencyObject) is not DataGridRow) return;
+                if (files.SelectedItem is not FileChoice item || !Dialogs.IsRowClick(files, e)) return;
                 if (item.Directory) await ReadFolder(item.Path);
                 else await Accept();
             };

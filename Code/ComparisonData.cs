@@ -80,12 +80,10 @@ namespace Certitude
         }
     }
 
-    internal sealed class ComparisonSource
+    internal sealed class ComparisonSource(string label, Func<CancellationToken, ComparisonDocument> read)
     {
-        public string Label { get; }
-        public Func<CancellationToken, ComparisonDocument> Read { get; }
-        public ComparisonSource(string label, Func<CancellationToken, ComparisonDocument> read)
-        { Label = label; Read = read; }
+        public string Label { get; } = label;
+        public Func<CancellationToken, ComparisonDocument> Read { get; } = read;
 
         public static ComparisonSource Encoded(byte[] bytes, string label) =>
             new ComparisonSource(label, token => ComparisonData.Read(bytes, label, token));
@@ -410,19 +408,14 @@ namespace Certitude
         {
             // Read lightweight template identities before fetching the selected template's settings.
             using var root = directory.Open(directory.TemplatesName);
-            using var search = new DirectorySearcher(root, "(objectClass=pKICertificateTemplate)",
-                new[] { "cn", "displayName", "msPKI-Cert-Template-OID", "distinguishedName" }, SearchScope.OneLevel)
-            {
-                PageSize = 1000, ClientTimeout = TimeSpan.FromSeconds(30),
-                ServerTimeLimit = TimeSpan.FromSeconds(30), ReferralChasing = ReferralChasingOption.None
-            };
+            using var search = OidDirectory.Search(root, "(objectClass=pKICertificateTemplate)",
+                ["cn", "displayName", "msPKI-Cert-Template-OID", "distinguishedName"], SearchScope.OneLevel);
             using var results = search.FindAll();
             var templates = new List<ComparisonTemplate>();
             foreach (SearchResult item in results)
             {
                 token.ThrowIfCancellationRequested();
-                string Text(string name) => item.Properties[name].Count == 0 ? "" :
-                    Convert.ToString(item.Properties[name][0], CultureInfo.InvariantCulture);
+                string Text(string name) => OidDirectory.Text(item, name);
                 templates.Add(new ComparisonTemplate { Name = Text("cn"), DisplayName = Text("displayName"),
                     Oid = Text("msPKI-Cert-Template-OID"), DistinguishedName = Text("distinguishedName") });
             }

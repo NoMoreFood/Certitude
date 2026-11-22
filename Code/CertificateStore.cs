@@ -24,12 +24,13 @@ namespace Certitude
     {
         internal const string AllAuthorities = "All CAs";
 
+        internal static bool IsConfiguration(string value) => !string.IsNullOrWhiteSpace(value) &&
+            value.IndexOf('\\') > 0 && !value.EndsWith("\\") && value.IndexOfAny(['\r', '\n', '"']) < 0;
+
         internal static string[] Configurations(IEnumerable<string> configurations)
         {
             // Normalize usable CA connection names before building the selection list.
-            var values = configurations.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim())
-                .Where(value => value.IndexOf('\\') > 0 && !value.EndsWith("\\") &&
-                    value.IndexOfAny(new[] { '\r', '\n', '"' }) < 0)
+            var values = configurations.Select(value => value?.Trim()).Where(IsConfiguration)
                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
             // Prefer a fully qualified host name when discovery also returns its short alias.
@@ -65,21 +66,19 @@ namespace Certitude
             if (JoinedDomain(null).Length == 0) return new List<string>();
 
             // Find published enterprise CAs in the forest configuration partition.
-            using (var root = OidDirectory.Bind("LDAP://RootDSE"))
-            {
-                var context = Convert.ToString(root.Properties["configurationNamingContext"].Value);
-                using (var directory = OidDirectory.Bind(
-                    "LDAP://CN=Enrollment Services,CN=Public Key Services,CN=Services," + context))
-                using (var search = new DirectorySearcher(directory, "(objectClass=pKIEnrollmentService)",
-                    new[] { "cn", "dNSHostName" }, SearchScope.OneLevel)
-                    { PageSize = 1000, ClientTimeout = TimeSpan.FromSeconds(10), ServerTimeLimit = TimeSpan.FromSeconds(10) })
-                using (var results = search.FindAll())
-                    return results.Cast<SearchResult>()
-                        .Where(result => result.Properties["cn"].Count > 0 && result.Properties["dNSHostName"].Count > 0)
-                        .Select(result => result.Properties["dNSHostName"][0] + "\\" + result.Properties["cn"][0])
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToList();
-            }
+            using var root = OidDirectory.Bind("LDAP://RootDSE");
+            var context = Convert.ToString(root.Properties["configurationNamingContext"].Value);
+            using var directory = OidDirectory.Bind(
+                "LDAP://CN=Enrollment Services," + OidDirectory.PublicKeyServices + context);
+            using var search = OidDirectory.Search(directory, "(objectClass=pKIEnrollmentService)",
+                ["cn", "dNSHostName"], SearchScope.OneLevel, seconds: 10);
+            search.ReferralChasing = ReferralChasingOption.External;
+            using var results = search.FindAll();
+            return results.Cast<SearchResult>()
+                .Where(result => result.Properties["cn"].Count > 0 && result.Properties["dNSHostName"].Count > 0)
+                .Select(result => result.Properties["dNSHostName"][0] + "\\" + result.Properties["cn"][0])
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToList();
         }
     }
 
@@ -230,15 +229,13 @@ namespace Certitude
 
     public sealed class DetailValue
     {
-        private string name;
-        private string value;
-        public string Name { get => name?.Replace("(UTC)", "(" + TimeDisplay.Current.Zone + ")"); set => name = value; }
+        public string Name { get => field?.Replace("(UTC)", "(" + TimeDisplay.Current.Zone + ")"); set; }
         public DateTime? Time { get; set; }
         internal TimeReport Report { get; set; }
         public string Value
         {
-            get => Time.HasValue ? TimeDisplay.Stamp(Time) : Report?.ToString() ?? value;
-            set => this.value = value;
+            get => Time.HasValue ? TimeDisplay.Stamp(Time) : Report?.ToString() ?? field;
+            set;
         }
     }
 
@@ -278,8 +275,7 @@ namespace Certitude
         public CertificateStore(string configuration)
         {
             // Require a usable server and CA name before retaining the connection target.
-            if (string.IsNullOrWhiteSpace(configuration) || configuration.IndexOf('\\') < 1 ||
-                configuration.EndsWith("\\") || configuration.IndexOfAny(new[] { '\r', '\n', '"' }) >= 0)
+            if (!CaDirectory.IsConfiguration(configuration))
                 throw new ArgumentException("Enter the CA as SERVER\\CA name.");
             Configuration = configuration;
         }
@@ -287,12 +283,10 @@ namespace Certitude
         public static string LocalConfiguration()
         {
             // Read the active local CA so startup can connect without manual selection.
-            using (var key = Registry.LocalMachine.OpenSubKey(
-                @"SYSTEM\CurrentControlSet\Services\CertSvc\Configuration"))
-            {
-                var name = key?.GetValue("Active") as string;
-                return string.IsNullOrEmpty(name) ? "" : Environment.MachineName + "\\" + name;
-            }
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Services\CertSvc\Configuration");
+            var name = key?.GetValue("Active") as string;
+            return string.IsNullOrEmpty(name) ? "" : Environment.MachineName + "\\" + name;
         }
 
         internal virtual CertificateStore ForRow(CertificateRow row)
@@ -352,7 +346,7 @@ namespace Certitude
                 return page;
             }
             if ((query.Match == SearchMatch.Exact && query.Value.Length > 0 &&
-                (query.Field == "CommonName" || query.Field == "SerialNumber")) || query.PrefixUpper != null)
+                query.Field is "CommonName" or "SerialNumber") || query.PrefixUpper != null)
             {
                 // Let the CA use the selective field index instead of forcing a scan in RequestID order.
                 var newest = new SortedSet<CertificateRow>(Comparer<CertificateRow>.Create(
@@ -777,11 +771,10 @@ namespace Certitude
                         case 1: row.CommonName = Convert.ToString(value, CultureInfo.InvariantCulture); break;
                         case 2: row.Requester = Convert.ToString(value, CultureInfo.InvariantCulture); break;
                         case 4: row.SerialNumber = Convert.ToString(value, CultureInfo.InvariantCulture); break;
-                        case 5: row.NotBefore = UtcDate(value); break;
-                        case 6: row.NotAfter = UtcDate(value); break;
+                        case 5: row.NotBefore = record.Date(index); break;
+                        case 6: row.NotAfter = record.Date(index); break;
                         case 7: row.Disposition = Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
-                        case 8: row.RevocationReason = value == null || value == DBNull.Value ? null :
-                            (int?)Convert.ToInt32(value, CultureInfo.InvariantCulture); break;
+                        case 8: row.RevocationReason = record.Number(index); break;
                     }
                 }
                 token.ThrowIfCancellationRequested();
@@ -914,9 +907,6 @@ namespace Certitude
             view.SetRestriction(view.GetColumnIndex(0, name), seek, sort, ref value);
         }
 
-        private static DateTime? UtcDate(object value) => value is DateTime date ?
-            (DateTime?)DateTime.SpecifyKind(date, DateTimeKind.Utc) : null;
-
         private static string NormalizeColumn(string name) => name.StartsWith("Request.",
             StringComparison.OrdinalIgnoreCase) ? name.Substring(8) : name;
 
@@ -967,65 +957,61 @@ namespace Certitude
                 }
                 // Limit the lookup to the chosen request and detect records that were deleted.
                 Restrict(view, "RequestID", 1, requestId);
-                using (var rows = new ComScope<ICertViewRow>(view.OpenView()))
+                using var rows = new ComScope<ICertViewRow>(view.OpenView());
+                token.ThrowIfCancellationRequested();
+                if (rows.Value.Next() < 0) throw new InvalidOperationException("This request no longer exists.");
+
+                // Retain raw fields and certificate bytes while adding a readable template name.
+                using (var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn()))
+                {
+                    while (columns.Value.Next() >= 0)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        var name = columns.Value.GetName();
+                        var value = columns.Value.GetValue(1);
+                        if (name == "RawCertificate" && value is string encoded && encoded.Length > 0)
+                            details.Certificate = Convert.FromBase64String(encoded);
+                        if (NormalizeColumn(name) == "RawRequest" && value is string request && request.Length > 0)
+                            details.Request = Convert.FromBase64String(request);
+                        details.Values.Add(new DetailValue { Name = name, Value = Format(value),
+                            Time = value is DateTime date ? TimeDisplay.Utc(date) : (DateTime?)null });
+                        if (NormalizeColumn(name) == "CertificateTemplate")
+                            details.Values.Add(new DetailValue { Name = "Resolved Certificate Template",
+                                Value = names.Template(Format(value)).Label });
+                    }
+                }
+                // Append enrollment attributes that are stored outside the main request columns.
+                using (var attributes = new ComScope<ICertViewAttribute>(rows.Value.EnumCertViewAttribute(0)))
+                {
+                    while (attributes.Value.Next() >= 0)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        details.Values.Add(new DetailValue
+                        {
+                            Name = "Attribute: " + attributes.Value.GetName(), Value = attributes.Value.GetValue()
+                        });
+                    }
+                }
+                // Preserve each extension OID, flags, and raw data for inspection or diagnosis.
+                using var extensions = new ComScope<ICertViewExtension>(rows.Value.EnumCertViewExtension(0));
+                while (extensions.Value.Next() >= 0)
                 {
                     token.ThrowIfCancellationRequested();
-                    if (rows.Value.Next() < 0) throw new InvalidOperationException("This request no longer exists.");
+                    var oid = extensions.Value.GetName();
+                    var flags = extensions.Value.GetFlags();
+                    var encoded = Format(extensions.Value.GetValue(3, 1));
+                    var name = "Extension: " + names.Describe(oid, 6) + " (Flags " + flags + ")";
+                    details.Values.Add(new DetailValue { Name = name + " · DER (Base64)", Value = encoded });
 
-                    // Retain raw fields and certificate bytes while adding a readable template name.
-                    using (var columns = new ComScope<ICertViewColumn>(rows.Value.EnumCertViewColumn()))
+                    // Add a decoded extension when its stored data can be interpreted.
+                    try
                     {
-                        while (columns.Value.Next() >= 0)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            var name = columns.Value.GetName();
-                            var value = columns.Value.GetValue(1);
-                            if (name == "RawCertificate" && value is string encoded && encoded.Length > 0)
-                                details.Certificate = Convert.FromBase64String(encoded);
-                            if (NormalizeColumn(name) == "RawRequest" && value is string request && request.Length > 0)
-                                details.Request = Convert.FromBase64String(request);
-                            details.Values.Add(new DetailValue { Name = name, Value = Format(value),
-                                Time = value is DateTime date ? TimeDisplay.Utc(date) : (DateTime?)null });
-                            if (NormalizeColumn(name) == "CertificateTemplate")
-                                details.Values.Add(new DetailValue { Name = "Resolved Certificate Template",
-                                    Value = names.Template(Format(value)).Label });
-                        }
+                        var extension = new System.Security.Cryptography.X509Certificates.X509Extension(
+                            oid, Convert.FromBase64String(encoded), (flags & 1) != 0);
+                        details.Values.Add(new DetailValue { Name = name,
+                            Report = new TimeReport().Append(() => names.FormatExtension(extension)) });
                     }
-                    // Append enrollment attributes that are stored outside the main request columns.
-                    using (var attributes = new ComScope<ICertViewAttribute>(rows.Value.EnumCertViewAttribute(0)))
-                    {
-                        while (attributes.Value.Next() >= 0)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            details.Values.Add(new DetailValue
-                            {
-                                Name = "Attribute: " + attributes.Value.GetName(), Value = attributes.Value.GetValue()
-                            });
-                        }
-                    }
-                    // Preserve each extension OID, flags, and raw data for inspection or diagnosis.
-                    using (var extensions = new ComScope<ICertViewExtension>(rows.Value.EnumCertViewExtension(0)))
-                    {
-                        while (extensions.Value.Next() >= 0)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            var oid = extensions.Value.GetName();
-                            var flags = extensions.Value.GetFlags();
-                            var encoded = Format(extensions.Value.GetValue(3, 1));
-                            var name = "Extension: " + names.Describe(oid, 6) + " (Flags " + flags + ")";
-                            details.Values.Add(new DetailValue { Name = name + " · DER (Base64)", Value = encoded });
-
-                            // Add a decoded extension when its stored data can be interpreted.
-                            try
-                            {
-                                var extension = new System.Security.Cryptography.X509Certificates.X509Extension(
-                                    oid, Convert.FromBase64String(encoded), (flags & 1) != 0);
-                                details.Values.Add(new DetailValue { Name = name,
-                                    Report = new TimeReport().Append(() => names.FormatExtension(extension)) });
-                            }
-                            catch (FormatException) { }
-                        }
-                    }
+                    catch (FormatException) { }
                 }
             }
             // Include OID resolution context and identifiers embedded in the certificate.
@@ -1067,7 +1053,7 @@ namespace Certitude
 
                     // Stream matching records with the most selective available query order.
                     var ordered = fields == null || query.Match != SearchMatch.Exact || query.Value.Length == 0 ||
-                        query.Field != "CommonName" && query.Field != "SerialNumber";
+                        query.Field is not ("CommonName" or "SerialNumber");
                     foreach (var row in ReadRows(query, null, token, ordered, required))
                     {
                         // Apply remaining export conditions and serialize only the requested fields.
@@ -1221,90 +1207,88 @@ namespace Certitude
             token.ThrowIfCancellationRequested();
             var sources = authorities.Where(source => !unavailable.ContainsKey(source.Configuration)).ToArray();
             if (sources.Length == 0) throw new InvalidOperationException(NoAuthorities);
-            using (var request = CancellationTokenSource.CreateLinkedTokenSource(token))
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(token);
+            // Use per-CA queues for ordered merging or one shared queue for direct streaming.
+            var buffers = Enumerable.Range(0, ordered ? sources.Length : 1)
+                .Select(_ => new BlockingCollection<CertificateRow>(256)).ToArray();
+            var remaining = sources.Length;
+
+            // Keep each COM enumerator on its own worker; bounded buffers limit read-ahead.
+            var workers = sources.Select((source, index) => Task.Factory.StartNew(() =>
             {
-                // Use per-CA queues for ordered merging or one shared queue for direct streaming.
-                var buffers = Enumerable.Range(0, ordered ? sources.Length : 1)
-                    .Select(_ => new BlockingCollection<CertificateRow>(256)).ToArray();
-                var remaining = sources.Length;
-
-                // Keep each COM enumerator on its own worker; bounded buffers limit read-ahead.
-                var workers = sources.Select((source, index) => Task.Factory.StartNew(() =>
-                {
-                    var buffer = buffers[ordered ? index : 0];
-                    var readAny = false;
-                    try
-                    {
-                        // Feed records into bounded queues while retaining their originating CA.
-                        foreach (var row in source.ReadRows(query, before, request.Token, ordered, fields, ascending))
-                        {
-                            row.Configuration = source.Configuration;
-                            readAny = true;
-                            buffer.Add(row, request.Token);
-                        }
-                    }
-                    catch (OperationCanceledException) { request.Cancel(); }
-                    catch (Exception error)
-                    {
-                        // Tolerate connection failures only before that CA has emitted any records.
-                        if (request.IsCancellationRequested) return;
-                        if (!readAny)
-                        {
-                            unavailable.TryAdd(source.Configuration, CaAdministration.Error(error));
-                            query.Progress?.For(source.Configuration).Complete(true);
-                            return;
-                        }
-                        // A failure after rows were emitted must not turn an incomplete export into a success.
-                        request.Cancel();
-                        throw new InvalidOperationException(source.Configuration + ": " +
-                            CaAdministration.Error(error), error);
-                    }
-                    finally
-                    {
-                        // Close the queue when its producer, or all shared producers, have finished.
-                        query.Progress?.For(source.Configuration).Complete();
-                        if (ordered || Interlocked.Decrement(ref remaining) == 0) buffer.CompleteAdding();
-                    }
-                }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
-
-                // Expose buffered worker results through disposable consumer enumerators.
-                var streams = buffers.Select(buffer => buffer.GetConsumingEnumerable(request.Token).GetEnumerator())
-                    .ToArray();
+                var buffer = buffers[ordered ? index : 0];
+                var readAny = false;
                 try
                 {
-                    // Return unordered results immediately as any CA produces them.
-                    if (!ordered)
+                    // Feed records into bounded queues while retaining their originating CA.
+                    foreach (var row in source.ReadRows(query, before, request.Token, ordered, fields, ascending))
                     {
-                        while (streams[0].MoveNext()) yield return streams[0].Current;
+                        row.Configuration = source.Configuration;
+                        readAny = true;
+                        buffer.Add(row, request.Token);
                     }
-                    else
+                }
+                catch (OperationCanceledException) { request.Cancel(); }
+                catch (Exception error)
+                {
+                    // Tolerate connection failures only before that CA has emitted any records.
+                    if (request.IsCancellationRequested) return;
+                    if (!readAny)
                     {
-                        // Merge the head of each CA stream to preserve global request ordering.
-                        var active = streams.Select(stream => stream.MoveNext()).ToArray();
-                        while (true)
-                        {
-                            request.Token.ThrowIfCancellationRequested();
-                            var next = -1;
-                            for (var i = 0; i < streams.Length; i++)
-                                if (active[i] && (next < 0 ||
-                                    CompareNewest(streams[i].Current, streams[next].Current, ascending) < 0)) next = i;
-                            if (next < 0) break;
-                            yield return streams[next].Current;
-                            active[next] = streams[next].MoveNext();
-                        }
+                        unavailable.TryAdd(source.Configuration, CaAdministration.Error(error));
+                        query.Progress?.For(source.Configuration).Complete(true);
+                        return;
                     }
-                    // Distinguish an empty result from cancellation or total connection failure.
-                    token.ThrowIfCancellationRequested();
-                    if (unavailable.Count == authorities.Length) throw new InvalidOperationException(NoAuthorities);
+                    // A failure after rows were emitted must not turn an incomplete export into a success.
+                    request.Cancel();
+                    throw new InvalidOperationException(source.Configuration + ": " +
+                        CaAdministration.Error(error), error);
                 }
                 finally
                 {
-                    // Stop producers and release all queues even when the caller ends enumeration early.
-                    request.Cancel();
-                    foreach (var stream in streams) stream.Dispose();
-                    try { Task.WhenAll(workers).GetAwaiter().GetResult(); }
-                    finally { foreach (var buffer in buffers) buffer.Dispose(); }
+                    // Close the queue when its producer, or all shared producers, have finished.
+                    query.Progress?.For(source.Configuration).Complete();
+                    if (ordered || Interlocked.Decrement(ref remaining) == 0) buffer.CompleteAdding();
                 }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+
+            // Expose buffered worker results through disposable consumer enumerators.
+            var streams = buffers.Select(buffer => buffer.GetConsumingEnumerable(request.Token).GetEnumerator())
+                .ToArray();
+            try
+            {
+                // Return unordered results immediately as any CA produces them.
+                if (!ordered)
+                {
+                    while (streams[0].MoveNext()) yield return streams[0].Current;
+                }
+                else
+                {
+                    // Merge the head of each CA stream to preserve global request ordering.
+                    var active = streams.Select(stream => stream.MoveNext()).ToArray();
+                    while (true)
+                    {
+                        request.Token.ThrowIfCancellationRequested();
+                        var next = -1;
+                        for (var i = 0; i < streams.Length; i++)
+                            if (active[i] && (next < 0 ||
+                                CompareNewest(streams[i].Current, streams[next].Current, ascending) < 0)) next = i;
+                        if (next < 0) break;
+                        yield return streams[next].Current;
+                        active[next] = streams[next].MoveNext();
+                    }
+                }
+                // Distinguish an empty result from cancellation or total connection failure.
+                token.ThrowIfCancellationRequested();
+                if (unavailable.Count == authorities.Length) throw new InvalidOperationException(NoAuthorities);
+            }
+            finally
+            {
+                // Stop producers and release all queues even when the caller ends enumeration early.
+                request.Cancel();
+                foreach (var stream in streams) stream.Dispose();
+                try { Task.WhenAll(workers).GetAwaiter().GetResult(); }
+                finally { foreach (var buffer in buffers) buffer.Dispose(); }
             }
         }
 

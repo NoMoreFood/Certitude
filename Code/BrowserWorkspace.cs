@@ -100,27 +100,29 @@ namespace Certitude
         internal QuerySpec Query(DateTime utcNow)
         {
             // Resolve rolling expiry presets at load time without changing explicitly saved dates.
-            var filter = Filter ?? throw new InvalidDataException("The saved view has no filters.");
-            var now = utcNow.ToUniversalTime();
-            return new QuerySpec
+            var filter = CloneFilter();
+            if (ExpiryDays is int days)
             {
-                Disposition = filter.Disposition, Fields = filter.Fields.ToArray(), Value = filter.Value,
-                Match = filter.Match, PageSize = filter.PageSize,
-                ExpiresFrom = ExpiryDays.HasValue ? (ExpiryDays > 0 ? now : (DateTime?)null) : filter.ExpiresFrom,
-                ExpiresBefore = ExpiryDays.HasValue ? now.AddDays(ExpiryDays.Value) : filter.ExpiresBefore
-            };
+                var now = utcNow.ToUniversalTime();
+                filter.ExpiresFrom = days > 0 ? now : null;
+                filter.ExpiresBefore = now.AddDays(days);
+            }
+            return filter;
+        }
+
+        private QuerySpec CloneFilter()
+        {
+            var filter = Filter ?? throw new InvalidDataException("The saved view has no filters.");
+            return new QuerySpec { Disposition = filter.Disposition, Fields = filter.Fields.ToArray(),
+                Value = filter.Value, Match = filter.Match, PageSize = filter.PageSize,
+                ExpiresFrom = filter.ExpiresFrom, ExpiresBefore = filter.ExpiresBefore };
         }
 
         internal BrowserView Copy()
         {
             // Isolate the mutable filter and column settings before editing a saved view.
             var copy = (BrowserView)MemberwiseClone();
-            copy.Filter = new QuerySpec
-            {
-                Disposition = Filter.Disposition, Fields = Filter.Fields.ToArray(), Value = Filter.Value,
-                Match = Filter.Match, PageSize = Filter.PageSize,
-                ExpiresFrom = Filter.ExpiresFrom, ExpiresBefore = Filter.ExpiresBefore
-            };
+            copy.Filter = CloneFilter();
             copy.Columns = Columns.Select(column => column.Copy()).ToList();
             return copy;
         }

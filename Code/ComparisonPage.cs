@@ -29,9 +29,7 @@ namespace Certitude
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 4) };
         private readonly TextBox search = new TextBox { Width = 220, Margin = new Thickness(0, 0, 8, 4) };
         private readonly TextBlock status = new TextBlock { TextWrapping = TextWrapping.Wrap };
-        private readonly TextBox preview = new TextBox { IsReadOnly = true, AcceptsReturn = true,
-            TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalContentAlignment = VerticalAlignment.Top, Height = 115, Margin = new Thickness(0, 5, 0, 5) };
+        private readonly TextBox preview = Dialogs.OutputBox(115, new Thickness(0, 5, 0, 5));
         private readonly Button cancel, export;
         private ComparisonRow[] rows = Array.Empty<ComparisonRow>();
         private CancellationTokenSource cancellation;
@@ -91,10 +89,7 @@ namespace Certitude
             header.Children.Add(filters);
             filters.Children.Add(differences);
             filters.Children.Add(encoding);
-            var searchLabel = Glyphs.Label("Search", true);
-            searchLabel.Target = search;
-            filters.Children.Add(searchLabel);
-            filters.Children.Add(search);
+            Dialogs.InlineField(filters, "Search", search);
             Dialogs.Button(filters, "_Swap", () =>
             {
                 (documents[0], documents[1]) = (documents[1], documents[0]);
@@ -159,10 +154,8 @@ namespace Certitude
         private void Column(string title, string property, double width, bool stretch = false)
         {
             // Keep long encoded values compact while exposing their complete contents in the selected-row preview.
-            var style = new Style(typeof(TextBlock), DataGridTextColumn.DefaultElementStyle);
-            style.Setters.Add(new Setter(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis));
             grid.Columns.Add(new DataGridTextColumn { Header = title, Binding = new Binding(property),
-                ElementStyle = style,
+                ElementStyle = (Style)FindResource("ComparisonCellText"),
                 Width = new DataGridLength(width, stretch ? DataGridLengthUnitType.Star : DataGridLengthUnitType.Pixel),
                 MinWidth = stretch ? 100 : 70 });
         }
@@ -246,8 +239,8 @@ namespace Certitude
             var selected = grid.Items.Cast<ComparisonRow>().ToArray();
             var first = documents[0]?.Source;
             var second = documents[1]?.Source;
-            var picker = new FilePicker(true) { Owner = this, FileName = "Comparison.csv", Filter = "CSV|*.csv" };
-            if (await picker.ShowAsync() != true) return;
+            var picker = await FilePicker.ChooseSave(this, "Comparison.csv", "CSV|*.csv");
+            if (picker == null) return;
             try
             {
                 var text = new StringBuilder(
@@ -305,10 +298,7 @@ namespace Certitude
             Dialogs.Button(recordInputs, "_Search", async () => await Search(false));
             next = Dialogs.Button(recordInputs, "_Older", async () => await Search(true));
             header.Children.Add(recordInputs);
-            var indexLabel = Glyphs.Label("CA Certificate Index", true);
-            indexLabel.Target = index;
-            crlInputs.Children.Add(indexLabel);
-            crlInputs.Children.Add(index);
+            Dialogs.InlineField(crlInputs, "CA Certificate Index", index);
             header.Children.Add(crlInputs);
 
             // Keep selection and cancellation actions available below the record table.
@@ -321,22 +311,17 @@ namespace Certitude
             cancel = Dialogs.Button(actions, "_Cancel Read", () => cancellation?.Cancel());
             Dialogs.Button(actions, "_Back", Close);
             footer.Children.Add(status);
-            foreach (var column in new[] { new[] { "Request ID", "RequestId" }, new[] { "Common Name", "CommonName" },
-                new[] { "Requester", "Requester" }, new[] { "Template", "TemplateDisplayName" },
-                new[] { "Status", "Status" } })
-                grid.Columns.Add(new DataGridTextColumn { Header = column[0], Binding = new Binding(column[1]),
-                    Width = new DataGridLength(column[1] == "RequestId" ? 0.6 : 1, DataGridLengthUnitType.Star),
-                    MinWidth = 70 });
+            foreach (var (label, property, width) in new[] { ("Request ID", "RequestId", 0.6),
+                ("Common Name", "CommonName", 1), ("Requester", "Requester", 1),
+                ("Template", "TemplateDisplayName", 1), ("Status", "Status", 1) })
+                grid.Columns.Add(new DataGridTextColumn { Header = label, Binding = new Binding(property),
+                    Width = new DataGridLength(width, DataGridLengthUnitType.Star), MinWidth = 70 });
             BusyCursor.OnSorting(grid);
             layout.Children.Add(grid);
             Content = layout;
             Dialogs.ScrollHeader(layout, header);
             grid.SelectionChanged += (sender, e) => Update();
-            grid.MouseDoubleClick += (sender, e) =>
-            {
-                if (ItemsControl.ContainerFromElement(grid, e.OriginalSource as DependencyObject) is DataGridRow)
-                    Accept();
-            };
+            Dialogs.OnRowDoubleClick(grid, Accept);
             search.KeyDown += async (sender, e) =>
             {
                 if (e.Key != Key.Enter) return;
@@ -462,20 +447,16 @@ namespace Certitude
             cancel = Dialogs.Button(actions, "_Cancel Read", () => cancellation?.Cancel());
             Dialogs.Button(actions, "_Back", Close);
             footer.Children.Add(status);
-            foreach (var column in new[] { new[] { "Display Name", "DisplayName" }, new[] { "Internal Name", "Name" },
-                new[] { "OID", "Oid" } })
-                grid.Columns.Add(new DataGridTextColumn { Header = column[0], Binding = new Binding(column[1]),
+            foreach (var (label, property) in new[] { ("Display Name", "DisplayName"), ("Internal Name", "Name"),
+                ("OID", "Oid") })
+                grid.Columns.Add(new DataGridTextColumn { Header = label, Binding = new Binding(property),
                     Width = new DataGridLength(1, DataGridLengthUnitType.Star), MinWidth = 100 });
             layout.Children.Add(grid);
             Content = layout;
             Dialogs.ScrollHeader(layout, header);
             BusyCursor.OnSorting(grid);
             grid.SelectionChanged += (sender, e) => use.IsEnabled = cancellation == null && grid.SelectedItem != null;
-            grid.MouseDoubleClick += (sender, e) =>
-            {
-                if (ItemsControl.ContainerFromElement(grid, e.OriginalSource as DependencyObject) is DataGridRow)
-                    Accept();
-            };
+            Dialogs.OnRowDoubleClick(grid, Accept);
             search.TextChanged += (sender, e) => Filter();
             target.TextChanged += (sender, e) =>
             {

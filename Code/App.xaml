@@ -561,6 +561,13 @@ Licensed under GPLv3. See LICENSE.md.
       <Setter Property="BorderBrush" Value="{DynamicResource Border}" />
       <Setter Property="BorderThickness" Value="0,0,1,1" />
     </Style>
+    <Style x:Key="StatisticsCellText" TargetType="TextBlock">
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Margin" Value="0,3" />
+    </Style>
+    <Style x:Key="ComparisonCellText" TargetType="TextBlock" BasedOn="{x:Static DataGridTextColumn.DefaultElementStyle}">
+      <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
     <Style x:Key="DetailsColumnHeaderStyle" TargetType="DataGridColumnHeader"
            BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
       <Setter Property="MinHeight" Value="27" />

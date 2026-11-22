@@ -13,6 +13,7 @@ Licensed under GPLv3. See LICENSE.md.
     <Style x:Key="WorkspaceIconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Width" Value="32" />
       <Setter Property="Height" Value="28" />
+      <Setter Property="Margin" Value="0,0,4,4" />
       <Setter Property="Padding" Value="4,3" />
       <Setter Property="Content" Value="" />
       <Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -101,8 +102,19 @@ Licensed under GPLv3. See LICENSE.md.
               BorderThickness="0,0,1,0" Padding="6,10,6,6">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel>
-            <TextBlock Text="Certificates And Requests" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{DynamicResource Muted}" Margin="4,0,0,5" />
+            <StackPanel.Resources>
+              <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                <Setter Property="HorizontalContentAlignment" Value="Left" />
+                <Setter Property="Margin" Value="0,0,0,4" />
+              </Style>
+              <Style x:Key="SidebarHeading" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="10" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="Foreground" Value="{DynamicResource Muted}" />
+                <Setter Property="Margin" Value="4,12,0,5" />
+              </Style>
+            </StackPanel.Resources>
+            <TextBlock Text="Certificates And Requests" Style="{StaticResource SidebarHeading}" Margin="4,0,0,5" />
             <ListBox x:Name="Views" SelectedIndex="0" BorderThickness="0" Background="Transparent"
                      SelectionChanged="FilterChanged" IsEnabled="False"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
@@ -118,46 +130,37 @@ Licensed under GPLv3. See LICENSE.md.
               <ListBoxItem Content="Denied Requests" Tag="31" local:Glyphs.Icon="{x:Static local:Glyphs.Cancel}" />
               <ListBoxItem Content="All Records" Tag="" local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
             </ListBox>
-            <TextBlock x:Name="PinnedViewsLabel" Text="Pinned Views" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{DynamicResource Muted}" Margin="4,12,0,5" Visibility="Collapsed" />
+            <TextBlock x:Name="PinnedViewsLabel" Text="Pinned Views" Style="{StaticResource SidebarHeading}" Visibility="Collapsed" />
             <StackPanel x:Name="PinnedViewsPanel" />
-            <TextBlock Text="Tools" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{DynamicResource Muted}" Margin="4,12,0,5" />
+            <TextBlock Text="Tools" Style="{StaticResource SidebarHeading}" />
             <Button x:Name="CertificateManagerButton" Content="Certificate _Manager" Click="CertificateToolsClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
             <Button x:Name="OidManagerButton" Content="_OID Manager" Click="OidManagerClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
+                    local:Glyphs.Icon="{x:Static local:Glyphs.List}" />
             <Button x:Name="PublishedButton" Content="Forest _Published" Click="PublishedClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Certificate}" />
             <Button Content="Certificate / CRL Chec_k" Click="ValidationClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
-            <Button Content="Compa_rison" Click="ComparisonClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" local:Glyphs.Icon="{x:Static local:Glyphs.Compare}" />
-            <Button x:Name="AdministrationButton" Content="_Administration" Click="AdministrationClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
-                    local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />
-            <Button x:Name="CrlHealthButton" Content="CRL _Health" Click="CrlHealthClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
+            <Button Content="Compa_rison" Click="ComparisonClick"
+                    local:Glyphs.Icon="{x:Static local:Glyphs.Compare}" />
+            <Button x:Name="AdministrationButton" Content="_Administration" Click="AdministrationClick"
+                    IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />
+            <Button x:Name="CrlHealthButton" Content="CRL _Health" Click="CrlHealthClick"
+                    IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
             <Button x:Name="ToolsButton" Content="Advanced _Tools" Click="ToolsClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
-                    local:Glyphs.Icon="{x:Static local:Glyphs.More}" />
+                    IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.More}" />
             <Button x:Name="StatisticsButton" Content="_Statistics" Click="StatisticsClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4" IsEnabled="False"
-                    local:Glyphs.Icon="{x:Static local:Glyphs.Statistics}" />
+                    IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Statistics}" />
             <Button x:Name="NativeCaButton" Content="CA MMC" Click="NativeCaClick"
-                    HorizontalContentAlignment="Left" Margin="0,8,0,4"
+                    Margin="0,8,0,4"
                     ToolTip="Open the Windows Certification Authority console; select its target independently."
                     local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
             <Button x:Name="NativeTemplatesButton" Content="Templates MMC" Click="NativeTemplatesClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4"
                     ToolTip="Open the Windows Certificate Templates console using your Windows identity."
                     local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
-            <TextBlock Text="Links" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{DynamicResource Muted}" Margin="4,12,0,5" />
+            <TextBlock Text="Links" Style="{StaticResource SidebarHeading}" />
             <StackPanel x:Name="LinksPanel" />
             <Button x:Name="AddLinkButton" Content="Add _Link..." Click="AddLinkClick"
-                    HorizontalContentAlignment="Left" Margin="0,0,0,4"
                     local:Glyphs.Icon="{x:Static local:Glyphs.Edit}" />
             <TextBlock x:Name="LinksNotice" Visibility="Collapsed" TextWrapping="Wrap" FontSize="10"
                        Margin="4,3,4,0" />
@@ -188,13 +191,13 @@ Licensed under GPLv3. See LICENSE.md.
               <TextBlock Text="Saved View" VerticalAlignment="Center" Margin="0,0,6,4" />
               <ComboBox x:Name="SavedViewsBox" Width="210" Margin="0,0,6,4" DisplayMemberPath="Name"
                         SelectionChanged="SavedViewSelected" AutomationProperties.Name="Saved View" />
-              <Button x:Name="OpenViewButton" Style="{StaticResource WorkspaceIconButton}" Margin="0,0,4,4" Click="OpenViewClick"
+              <Button x:Name="OpenViewButton" Style="{StaticResource WorkspaceIconButton}" Click="OpenViewClick"
                       ToolTip="Open saved view" AutomationProperties.Name="Open saved view"
                       local:Glyphs.Icon="{x:Static local:Glyphs.Open}" />
-              <Button x:Name="SaveViewButton" Style="{StaticResource WorkspaceIconButton}" Margin="0,0,4,4" Click="SaveViewClick"
+              <Button x:Name="SaveViewButton" Style="{StaticResource WorkspaceIconButton}" Click="SaveViewClick"
                       ToolTip="Save current view" AutomationProperties.Name="Save current view"
                       local:Glyphs.Icon="{x:Static local:Glyphs.Save}" />
-              <Button x:Name="ManageViewsButton" Style="{StaticResource WorkspaceIconButton}" Margin="0,0,4,4" Click="ManageViewsClick"
+              <Button x:Name="ManageViewsButton" Style="{StaticResource WorkspaceIconButton}" Click="ManageViewsClick"
                       ToolTip="Manage saved views and connections" AutomationProperties.Name="Manage saved views and connections"
                       local:Glyphs.Icon="{x:Static local:Glyphs.Settings}" />
             </WrapPanel>

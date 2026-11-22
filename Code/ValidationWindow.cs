@@ -108,11 +108,8 @@ namespace Certitude
             editor.Children.Add(run);
             var timing = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 6, 4) };
             run.Children.Add(timing);
-            var timeoutLabel = Glyphs.Label("Retrieval Timeout (Seconds)", true);
-            timing.Children.Add(timeoutLabel);
             timeout = new TextBox { Text = "15", Width = 55 };
-            timeoutLabel.Target = timeout;
-            timing.Children.Add(timeout);
+            Dialogs.InlineField(timing, "Retrieval Timeout (Seconds)", timeout);
             Dialogs.Button(run, "_Validate", async () => await Validate());
 
             // Explain retrieval scope and create controls for cancellation and result exports.
@@ -137,10 +134,8 @@ namespace Certitude
             {
                 // Save the selected inspected CRL using its original encoded bytes.
                 if (downloaded.SelectedItem is not CrlResult selected) return;
-                var save = new FilePicker(true) { FileName = selected.IsDelta ? "delta.crl" : "base.crl", Filter = "CRL|*.crl" };
-                if (await save.ShowAsync() != true) return;
-                try { CertificateUtilities.WriteAtomic(save.FileName, selected.Encoded); }
-                catch (Exception error) { status.Text = CaAdministration.Error(error); }
+                await Dialogs.SaveFile(this, selected.IsDelta ? "delta.crl" : "base.crl", "CRL|*.crl",
+                    _ => selected.Encoded, status);
             });
             saveCrl.IsEnabled = false;
             Dialogs.ComparisonMenu(downloaded, () => ComparisonSource.Encoded(
@@ -150,34 +145,21 @@ namespace Certitude
             {
                 // Export the visible validation report as text.
                 if (output.Text.Length == 0) return;
-                var save = new FilePicker(true) { FileName = "Certificate-validation.txt", Filter = "Text|*.txt" };
-                if (await save.ShowAsync() != true) return;
-                try { CertificateUtilities.WriteAtomic(save.FileName, Encoding.UTF8.GetBytes(output.Text)); }
-                catch (Exception error) { status.Text = CaAdministration.Error(error); }
+                await Dialogs.SaveFile(this, "Certificate-validation.txt", "Text|*.txt",
+                    _ => Encoding.UTF8.GetBytes(output.Text), status);
             });
 
             // Show inspected CRLs and a read-only diagnostic output area.
             status = new TextBlock { Text = "Ready. Validation does not change the CA.", TextWrapping = TextWrapping.Wrap };
             footer.Children.Add(status);
-            output = new TextBox
-            {
-                IsReadOnly = true, AcceptsReturn = true, VerticalContentAlignment = VerticalAlignment.Top,
-                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
-            };
+            output = Dialogs.OutputBox(monospace: true);
             Dialogs.CertificateMenu(output, () => certificate, ready: () => cancellation == null);
             layout.Children.Add(output);
             Content = layout;
             Dialogs.ScrollHeader(layout, editor);
 
             // Automatically validate a certificate supplied by another workspace action.
-            var validateOnLoad = encoded != null;
-            Loaded += async (sender, e) =>
-            {
-                if (!validateOnLoad) return;
-                validateOnLoad = false;
-                await Validate();
-            };
+            if (encoded != null) OnFirstLoad(Validate);
 
             // Invalidate results whenever validation inputs or options change.
             issuerFiles.TextChanged += (sender, e) => ClearResult();
@@ -248,25 +230,24 @@ namespace Certitude
                 editor.IsEnabled = false;
                 cancel.IsEnabled = true;
                 status.Text = "Validating…";
-                using (cancellation = new CancellationTokenSource())
-                {
-                    // Resolve permitted OID names and run native validation away from the UI thread.
-                    var token = cancellation.Token;
-                    var progress = new Progress<string>(message => status.Text = message);
-                    var names = cached ? oids ?? OidNames.Windows :
-                        await Task.Run(() => oids?.Refresh() ?? OidNames.Local, token);
-                    if (!cached) oids = names;
-                    var result = await Task.Run(() => CertificateValidation.Validate(certificate, issuers, crls,
-                        cached, fetch, wholeChain, seconds, token, progress, names), token);
+                using var request = new CancellationTokenSource();
+                cancellation = request;
+                // Resolve permitted OID names and run native validation away from the UI thread.
+                var token = request.Token;
+                var progress = new Progress<string>(message => status.Text = message);
+                var names = cached ? oids ?? OidNames.Windows :
+                    await Task.Run(() => oids?.Refresh() ?? OidNames.Local, token);
+                if (!cached) oids = names;
+                var result = await Task.Run(() => CertificateValidation.Validate(certificate, issuers, crls,
+                    cached, fetch, wholeChain, seconds, token, progress, names), token);
 
-                    // Publish the completed report and enable export of its inspected CRLs.
-                    token.ThrowIfCancellationRequested();
-                    TimeDisplay.Text(output, () => result.Report.ToString());
-                    downloaded.ItemsSource = result.Crls;
-                    downloaded.SelectedIndex = result.Crls.Count > 0 ? 0 : -1;
-                    saveCrl.IsEnabled = result.Crls.Count > 0;
-                    status.Text = result.Summary;
-                }
+                // Publish the completed report and enable export of its inspected CRLs.
+                token.ThrowIfCancellationRequested();
+                TimeDisplay.Text(output, () => result.Report.ToString());
+                downloaded.ItemsSource = result.Crls;
+                downloaded.SelectedIndex = result.Crls.Count > 0 ? 0 : -1;
+                saveCrl.IsEnabled = result.Crls.Count > 0;
+                status.Text = result.Summary;
             }
             catch (OperationCanceledException) { status.Text = "Validation cancelled."; }
             catch (Exception error) { status.Text = CaAdministration.Error(error); }
