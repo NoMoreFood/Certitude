@@ -193,12 +193,14 @@ namespace Certitude
                 report(new CrlHealthEntry { Configuration = configuration, Item = "Distribution points",
                     Status = "Not checked", Source = certificate.Subject,
                     Details = new TimeReport("The sampled certificate has no URL distribution points.") });
-            retrieve ??= url => CertificateValidation.RetrieveCrls(url, false, 15);
+            var network = NetworkAccess.Current;
+            retrieve ??= url => CertificateValidation.RetrieveCrls(url, false, 15, token, network);
             while (urls.Count > 0)
             {
                 token.ThrowIfCancellationRequested();
                 var location = urls.Dequeue();
                 if (!seen.Add(location)) continue;
+                var route = "CRL retrieval: " + network.CrlRoute(location.Url, false) + "\r\n";
                 var entry = new CrlHealthEntry { Configuration = configuration,
                     Item = location.Delta ? "Delta CDP" : "Base CDP", Source = location.Url };
                 if (seen.Count > 64)
@@ -233,7 +235,7 @@ namespace Certitude
                             }
                             report(new CrlHealthEntry { Configuration = configuration, Item = entry.Item,
                                 Source = location.Url, Status = status,
-                                Expires = crl.NextUpdate, Details = crl.Details });
+                                Expires = crl.NextUpdate, Details = new TimeReport(route).Append(crl.Details) });
                             if (!crl.IsDelta && crl.SignatureValid == true && crl.IssuerMatches && crl.ScopeMatches)
                                 foreach (var url in CertificateValidation.DeltaUrls(certificate.Handle, bytes))
                                     urls.Enqueue((url, true));
@@ -242,7 +244,7 @@ namespace Certitude
                         {
                             report(new CrlHealthEntry { Configuration = configuration, Item = entry.Item,
                                 Source = location.Url, Status = "Unavailable",
-                                Details = new TimeReport(CaAdministration.Error(error)) });
+                                Details = new TimeReport(route).Append(CaAdministration.Error(error)) });
                         }
                     }
                 }
@@ -250,7 +252,7 @@ namespace Certitude
                 catch (Exception error)
                 {
                     entry.Status = "Unavailable";
-                    entry.Details = new TimeReport(CaAdministration.Error(error));
+                    entry.Details = new TimeReport(route).Append(CaAdministration.Error(error));
                     report(entry);
                 }
             }
@@ -278,8 +280,8 @@ namespace Certitude
             DockPanel.SetDock(header, Dock.Top);
             layout.Children.Add(header);
             Dialogs.Note(header, "CA certificates, CRLs and publication status. Download checks use the newest " +
-                "issued certificate from each CA and run from this computer; older certificates may use other " +
-                "locations. Use Certificate / CRL Check for certificate-chain and revocation validation.");
+                "issued certificate from each CA. Each distribution point lists its retrieval route. Older certificates " +
+                "may use other locations. Use Certificate / CRL Check for chain and revocation validation.");
             var actions = new WrapPanel();
             header.Children.Add(actions);
             refresh = Dialogs.Button(actions, "_Refresh", async () => await Refresh());

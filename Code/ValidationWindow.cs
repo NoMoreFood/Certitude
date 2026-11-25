@@ -113,7 +113,7 @@ namespace Certitude
             Dialogs.Button(run, "_Validate", async () => await Validate());
 
             // Explain retrieval scope and create controls for cancellation and result exports.
-            Dialogs.Note(editor, "Online retrieval checks each CRL location directly, including delta locations. " +
+            Dialogs.Note(editor, "Online retrieval uses the configured HTTP proxy policy for HTTP(S) CRL locations. " +
                 "Offline mode uses local files and Windows caches. Supporting certificates are not trusted.");
             var footer = new StackPanel { Margin = new Thickness(0, 6, 0, 0) };
             DockPanel.SetDock(footer, Dock.Bottom);

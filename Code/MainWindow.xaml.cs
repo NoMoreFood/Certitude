@@ -562,8 +562,8 @@ namespace Certitude
             Views.IsEnabled = FilterPanel.IsEnabled = store != null && !busy;
             ActionsPanel.IsEnabled = !working && !filtersDirty && Certificates.SelectedItems.Count > 0;
             ExportButton.IsEnabled = !working && !filtersDirty && query != null;
-            AdministrationButton.IsEnabled = ToolsButton.IsEnabled =
-                CrlHealthButton.IsEnabled = !working && store != null;
+            ToolsButton.IsEnabled = !working;
+            AdministrationButton.IsEnabled = CrlHealthButton.IsEnabled = !working && store != null;
             StatisticsButton.IsEnabled = !working && store != null && !store.IsAllAuthorities;
             StatisticsButton.Visibility = store?.IsAllAuthorities == true ? Visibility.Collapsed : Visibility.Visible;
             if (autoAuthorityColumn)
@@ -999,9 +999,9 @@ namespace Certitude
 
         private void ToolsClick(object sender, RoutedEventArgs e)
         {
-            // Let the maintenance page restrict combined connections to connectivity checks.
-            if (busy || queryLoads > 0 || store == null) return;
-            Navigate(new ToolWindow(store, Record));
+            // Standalone network tools are available before connecting to a CA.
+            if (busy || queryLoads > 0) return;
+            Navigate(new ToolWindow(store, Record, OpenNetworkProxy));
         }
 
         private void CrlHealthClick(object sender, RoutedEventArgs e)

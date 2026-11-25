@@ -171,6 +171,7 @@ namespace Certitude
     {
         public bool UseUtc { get; set; }
         public bool PromptForCrlPublication { get; set; } = true;
+        public string NetworkProxy { get; set; } = NetworkAccess.SystemProxy;
         internal static readonly string[] ColumnKeys =
         {
             "RequestId", "Configuration", "CommonName", "Status", "Requester", "Template",
@@ -223,6 +224,7 @@ namespace Certitude
         {
             // Keep unsupported versions and duplicate identities out of the writable workspace.
             if (Version != 1) throw new InvalidDataException("This workspace file version is not supported.");
+            NetworkAccess.Parse(NetworkProxy);
             new QuerySpec { Fields = SearchFields }.Validate();
             if (Authorities == null || Authorities.Count > 1000 ||
                 Authorities.Any(value => value == null || value.Length > 2048) ||

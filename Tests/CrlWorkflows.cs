@@ -55,7 +55,7 @@ namespace Certitude
                 var entries = CheckHealth();
                 CheckReleasePaths(args[0]);
                 CheckWorkspace(args[0], entries);
-                Console.WriteLine("Release workflow checks passed; no live CA or network calls were made.");
+                Console.WriteLine("Release workflow checks passed, including loopback network diagnostics.");
                 return 0;
             }
             catch (Exception error) { Console.Error.WriteLine(error); return 1; }
@@ -297,6 +297,8 @@ namespace Certitude
             Assert(entries.Count(value => value.Status == "Current; matches CA") == 2 &&
                 entries.Any(value => value.Status == "Unavailable") && calls.Count == 3,
                 "An unreachable CDP must not hide the base or delta results.");
+            Assert(entries.All(entry => entry.Details.ToString().Contains("CRL retrieval: Windows URL retrieval")),
+                "CRL health omitted the retrieval route from a success or failure.");
             var preview = entries.ToList();
             Check(url => new List<byte[]> { fixtures[url.Contains("delta") ? "delta" : "oldBase"] });
             Assert(entries.Any(value => value.Status == "Current; differs from CA snapshot"),
@@ -370,6 +372,7 @@ namespace Certitude
             toggle.IsChecked = true;
             toggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert(BrowserWorkspace.Load(path).PromptForCrlPublication, "The reminder must be re-enableable.");
+            CheckScep(window, path, output);
             Call(window, "ReturnToBrowser");
             offer = (Task)Call(window, "OfferCrlPublication", (object)new[] { targets[0], targets[2] });
             Click(window.ActivePage, "_Review Publication…");
@@ -412,9 +415,15 @@ namespace Certitude
             .Single(button => Equals(button.Content, caption)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         private static void Complete(Task task)
         {
+            WaitFor(() => task.IsCompleted);
+            task.GetAwaiter().GetResult();
+        }
+
+        private static void WaitFor(Func<bool> ready)
+        {
             // Let asynchronous workspace continuations finish without blocking their dispatcher.
             var deadline = DateTime.UtcNow.AddSeconds(15);
-            while (!task.IsCompleted)
+            while (!ready())
             {
                 Assert(DateTime.UtcNow < deadline, "The workspace operation did not complete within 15 seconds.");
                 var frame = new DispatcherFrame();
@@ -422,7 +431,6 @@ namespace Certitude
                     new Action(() => frame.Continue = false));
                 Dispatcher.PushFrame(frame);
             }
-            task.GetAwaiter().GetResult();
         }
         private static void Render(MainWindow window, string path, double scale, double width = 900, double height = 620)
         {

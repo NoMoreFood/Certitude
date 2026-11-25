@@ -38,6 +38,7 @@ namespace Certitude
                     CaAdministration.Error(error));
             }
             // Restore saved controls before falling back to automatic local-CA selection.
+            NetworkAccess.Current = NetworkAccess.Parse(savedWorkspace.NetworkProxy);
             TimeDisplay.Current.UseUtc = savedWorkspace.UseUtc;
             UtcToggle.IsChecked = savedWorkspace.UseUtc;
             foreach (var column in Certificates.Columns.Where(column =>
@@ -380,9 +381,74 @@ namespace Certitude
                 PersistWorkspace();
             };
             preferences.Children.Add(publicationPrompt);
+            Dialogs.Button(preferences, "Network Pro_xy…", OpenNetworkProxy).HorizontalAlignment =
+                HorizontalAlignment.Left;
             tabs.Items.Add(new TabItem { Header = "Preferences", Content = preferences });
             manager.Content = tabs;
             Navigate(manager);
+        }
+
+        private void OpenNetworkProxy()
+        {
+            // Edit the shared routing policy independently of the current CA or saved view.
+            var page = new WorkspacePage { Title = "Network Proxy" };
+            var form = new StackPanel { Margin = new Thickness(8) };
+            var current = NetworkAccess.Current;
+            var mode = new ComboBox { HorizontalAlignment = HorizontalAlignment.Left, MinWidth = 200,
+                ItemsSource = new[] { "Windows Proxy Settings", "Direct Connection", "Manual HTTP Proxy" },
+                SelectedIndex = current.Setting == NetworkAccess.SystemProxy ? 0 : current.Address == null ? 1 : 2 };
+            var label = Glyphs.Label("Connection _Mode");
+            label.Target = mode;
+            System.Windows.Automation.AutomationProperties.SetLabeledBy(mode, label);
+            form.Children.Add(label);
+            form.Children.Add(mode);
+            var manual = new StackPanel();
+            form.Children.Add(manual);
+            var address = Dialogs.Field(manual, "Proxy _Address", current.Address?.AbsoluteUri ?? "");
+            address.ToolTip = "http://proxy.example.com:8080";
+            var status = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            void ShowAddress()
+            {
+                manual.Visibility = mode.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+                if (workspaceWritable) status.Text = "";
+            }
+            mode.SelectionChanged += (sender, args) => ShowAddress();
+            address.TextChanged += (sender, args) => { if (workspaceWritable) status.Text = ""; };
+            ShowAddress();
+            Dialogs.Note(form, "SCEP and HTTP(S) CRL downloads follow this setting. Loopback connections stay local. " +
+                "TLS endpoint checks connect directly unless you select a manual proxy that allows anonymous CONNECT. " +
+                "Windows controls certificate-chain and revocation lookups.");
+
+            // Publish a new policy only after the workspace has saved it successfully.
+            var actions = new WrapPanel();
+            form.Children.Add(actions);
+            var save = Dialogs.Button(actions, "_Save", () =>
+            {
+                try
+                {
+                    var policy = NetworkAccess.Parse(mode.SelectedIndex switch
+                    {
+                        0 => NetworkAccess.SystemProxy, 1 => NetworkAccess.Direct, _ => address.Text.Trim()
+                    }, manual: mode.SelectedIndex == 2);
+                    savedWorkspace.NetworkProxy = policy.Setting;
+                    if (!PersistWorkspace())
+                    {
+                        savedWorkspace.NetworkProxy = current.Setting;
+                        status.Text = WorkspaceNotice.Text;
+                        return;
+                    }
+                    NetworkAccess.Current = policy;
+                    Record("Network proxy saved.");
+                    page.Close();
+                }
+                catch (ArgumentException error) { status.Text = error.Message; }
+            });
+            save.IsEnabled = workspaceWritable;
+            if (!workspaceWritable) status.Text = WorkspaceNotice.Text;
+            Dialogs.Button(actions, "_Cancel", page.Close);
+            form.Children.Add(status);
+            page.Content = new ScrollViewer { Content = form, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            page.Show();
         }
 
         private async Task OfferCrlPublication(string[] affected)

@@ -509,7 +509,8 @@ namespace Certitude
         }
 
         public static async Task<TlsProbeResult> Probe(string host, int port, string serverName,
-            bool revocation, int seconds, string expectedThumbprint, CancellationToken token, OidNames names = null)
+            bool revocation, int seconds, string expectedThumbprint, CancellationToken token, OidNames names = null,
+            bool direct = false)
         {
             // Validate the endpoint, expected name, timeout, and optional certificate fingerprint.
             names = names?.Refresh() ?? OidNames.Local;
@@ -538,8 +539,8 @@ namespace Certitude
             {
                 // Connect with IPv4 or IPv6 support before starting certificate negotiation.
                 if (client.Client.AddressFamily == AddressFamily.InterNetworkV6) client.Client.DualMode = true;
-                await client.ConnectAsync(host, port).ConfigureAwait(false);
-                report.AppendLine("Connected address: " + client.Client?.RemoteEndPoint);
+                await NetworkAccess.Current.ConnectTls(client, host, port, report, deadline.Token, direct)
+                    .ConfigureAwait(false);
                 using var ssl = new SslStream(client.GetStream(), false,
                     (sender, certificate, chain, errors) =>
                 {
@@ -597,8 +598,8 @@ namespace Certitude
                     (result.ExpectedCertificateMatches.Value ? "MATCH" : "MISMATCH"));
             }
             // Finish the report with the scope of the endpoint check.
-            report.AppendLine("No application data was sent. Direct TLS only; " +
-                "STARTTLS and client authentication are not tested.");
+            report.AppendLine("The check ends at the TLS handshake. STARTTLS and client authentication " +
+                "are outside its scope.");
             report.AppendLine("A certificate installed or renewed in a store " +
                 "may still require a service binding update.");
             result.Report = report;

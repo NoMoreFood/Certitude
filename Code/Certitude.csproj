@@ -74,6 +74,9 @@ Licensed under GPLv3. See LICENSE.md.
     <Compile Include="DateTimePicker.cs" />
     <Compile Include="WorkspacePage.cs" />
     <Compile Include="ToolWindow.cs" />
+    <Compile Include="NetworkAccess.cs" />
+    <Compile Include="ScepTester.cs" />
+    <Compile Include="ScepPage.cs" />
     <Compile Include="CaMaintenance.cs" />
     <Compile Include="CertificateValidation.cs" />
     <Compile Include="ValidationWindow.cs" />

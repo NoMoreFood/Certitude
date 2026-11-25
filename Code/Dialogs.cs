@@ -10,6 +10,7 @@ using System.Linq;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
@@ -142,6 +143,20 @@ namespace Certitude
             return box;
         }
 
+        public static void StackedField(Panel panel, string label, FrameworkElement control)
+        {
+            // Align labeled controls along the bottom of a wrapping form row.
+            var field = new StackPanel { Width = control.Width, Margin = new Thickness(0, 0, 8, 4),
+                VerticalAlignment = VerticalAlignment.Bottom };
+            var caption = Glyphs.Label(label);
+            caption.Target = control;
+            AutomationProperties.SetLabeledBy(control, caption);
+            caption.Margin = new Thickness(0, 0, 0, 3);
+            field.Children.Add(caption);
+            field.Children.Add(control);
+            panel.Children.Add(field);
+        }
+
         public static void InlineField(Panel panel, string caption, FrameworkElement control, Thickness? margin = null)
         {
             var label = Glyphs.Label(caption, true);
@@ -191,9 +206,10 @@ namespace Certitude
                 "\r\n\r\n" + detail);
         }
 
-        public static Task<bool> Confirm(DependencyObject owner, string title, string text) =>
-            Confirm(owner, title, () => text);
-        public static async Task<bool> Confirm(DependencyObject owner, string title, Func<string> text)
+        public static Task<bool> Confirm(DependencyObject owner, string title, string text,
+            CancellationToken token = default) => Confirm(owner, title, () => text, token);
+        public static async Task<bool> Confirm(DependencyObject owner, string title, Func<string> text,
+            CancellationToken token = default)
         {
             // Present confirmation in the main workspace with explicit continue and cancel actions.
             var page = new WorkspacePage { Owner = owner, Title = Caption(title) };
@@ -207,7 +223,9 @@ namespace Certitude
             TimeDisplay.Text(output, text);
             layout.Children.Add(output);
             page.Content = layout;
-            return await page.ShowAsync() == true;
+            var result = page.ShowAsync();
+            using var cancelled = token.Register(() => page.Dispatcher.BeginInvoke(new Action(page.Close)));
+            return await result == true;
         }
 
         public static async Task<string> Prompt(DependencyObject owner, string title, string label,

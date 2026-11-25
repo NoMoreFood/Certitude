@@ -32,18 +32,30 @@ namespace Certitude
         private CancellationTokenSource cancellation;
         private bool busy;
 
-        public ToolWindow(CertificateStore store, Action<string> log)
+        public ToolWindow(CertificateStore store, Action<string> log, Action openProxy)
         {
-            // Snapshot the connected targets and expose only operations supported by their scope.
-            config = store.Configuration;
-            configurations = store.Configurations;
-            allAuthorities = store.IsAllAuthorities;
+            // Keep endpoint diagnostics available for every connection scope.
+            config = store?.Configuration;
+            configurations = store?.Configurations;
+            allAuthorities = store?.IsAllAuthorities == true;
             record = log;
-            Title = "Advanced Tools — " + config;
+            Title = store == null ? "Advanced Tools" : "Advanced Tools — " + config;
             var layout = new DockPanel { Margin = new Thickness(8) };
             editor = new StackPanel();
             DockPanel.SetDock(editor, Dock.Top);
             layout.Children.Add(editor);
+            var network = new WrapPanel();
+            editor.Children.Add(network);
+            Dialogs.Button(network, "SCEP _Tester…", () => new ScepPage(record) { Owner = this }.Show());
+            Dialogs.Button(network, "Network Pro_xy…", openProxy);
+            if (store == null)
+            {
+                Dialogs.Note(editor, "Connect to a certificate authority to access CA maintenance.");
+                Content = layout;
+                return;
+            }
+
+            // Expose only maintenance operations supported by the connected targets.
             Dialogs.Note(editor, allAuthorities ? "Check connectivity to every connected CA, including CAs " +
                 "unavailable to certificate queries. Connect to one CA for backups and local database maintenance.\n" +
                 string.Join("\n", configurations) : "Choose a maintenance operation. Database, backup and " +

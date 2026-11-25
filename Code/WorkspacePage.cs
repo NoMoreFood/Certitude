@@ -84,6 +84,7 @@ namespace Certitude
         public string Title { get; set; }
         public DependencyObject Owner { get; set; }
         public event CancelEventHandler Closing;
+        internal event Action Closed;
         internal event Action<bool> TimeChanged;
         internal void RefreshTimes(bool previousUtc) => TimeChanged?.Invoke(previousUtc);
         protected void OnFirstLoad(Func<Task> load)
@@ -118,7 +119,10 @@ namespace Certitude
             Closing?.Invoke(this, args);
             return !args.Cancel;
         }
-        internal void Complete(bool? result) => completion.TrySetResult(result);
+        internal void Complete(bool? result)
+        {
+            if (completion.TrySetResult(result)) Closed?.Invoke();
+        }
     }
 
     internal abstract class DirectoryPage(Action<string> log) : WorkspacePage

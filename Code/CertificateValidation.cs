@@ -73,6 +73,7 @@ namespace Certitude
 
             // Create an isolated store for supplied issuers and CRLs used by this validation.
             var result = new ValidationResult();
+            var network = NetworkAccess.Current;
             var extra = new X509Certificate2Collection();
             var inputs = new List<KeyValuePair<string, byte[]>>();
             var notes = new StringBuilder();
@@ -117,15 +118,17 @@ namespace Certitude
                         var url = urls.Dequeue();
                         if (!seen.Add(url)) continue;
                         progress?.Report((offline ? "Reading cached CRL: " : "Retrieving CRL: ") + url);
+                        notes.AppendLine("CRL retrieval: " + url + " · " + network.CrlRoute(url, offline));
                         try
                         {
                             // Retain each retrieved CRL and discover any further delta locations it advertises.
-                            foreach (var bytes in RetrieveCrls(url, offline, timeoutSeconds))
+                            foreach (var bytes in RetrieveCrls(url, offline, timeoutSeconds, token, network))
                             {
                                 AddCrl(store, inputs, url, bytes);
                                 foreach (var delta in DeltaUrls(certificate.Handle, bytes)) urls.Enqueue(delta);
                             }
                         }
+                        catch (OperationCanceledException) { throw; }
                         catch (Exception error) { notes.AppendLine(url + "\r\n  " + CaAdministration.Error(error)); }
                     }
                 }
@@ -146,7 +149,9 @@ namespace Certitude
                     text.AppendLine("SHA-256: " + CertificateUtilities.Sha256(certificate.RawData));
                     text.Append("Checked: ").AppendTime(DateTime.UtcNow).AppendLine();
                     text.AppendLine("OID Resolution: " + names.Status);
-                    text.AppendLine("Mode: " + (offline ? "Offline / local files and Windows cache" : "Online"));
+                    text.AppendLine("Mode: " + (offline ? "Offline / local files and Windows cache" :
+                        "Online / Windows chain and revocation policy"));
+                    if (retrieve && !offline) text.AppendLine("HTTP(S) CRL download policy: " + network.HttpPolicy);
                     text.AppendLine("Revocation scope: " +
                         (entireChain ? "Chain, excluding the root" : "Selected certificate"));
                     text.AppendLine();
@@ -450,17 +455,85 @@ namespace Certitude
             SameName(certificate.IssuerName.RawData, issuer.SubjectName.RawData) &&
             CryptVerifyCertificateSignatureEx(IntPtr.Zero, 1, 2, certificate.Handle, 2, issuer.Handle, 0, IntPtr.Zero);
 
-        internal static List<byte[]> RetrieveCrls(string url, bool offline, int timeoutSeconds)
+        internal static X509Certificate2[] ScepAuthorities(X509Certificate2[] supplied, X509Certificate2[] anchors,
+            bool requireAgentUsage)
         {
-            var options = new RetrievalOptions { Size = Marshal.SizeOf<RetrievalOptions>(), MaximumBytes = 100 * 1024 * 1024 };
-
-            // MULTIPLE_OBJECTS returns a store, including LDAP responses containing multiple CRLs.
-            if (!CryptRetrieveObjectByUrl(url, new IntPtr(2), offline ? 3u : 13u, timeoutSeconds * 1000,
-                out var store, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, ref options))
+            // Use the authenticated CA certificates as exclusive trust anchors without installing them in Windows.
+            using var roots = CertOpenStore(new IntPtr(2), 0, IntPtr.Zero, 0, IntPtr.Zero);
+            using var extra = CertOpenStore(new IntPtr(2), 0, IntPtr.Zero, 0, IntPtr.Zero);
+            if (roots.IsInvalid || extra.IsInvalid) throw NativeError();
+            foreach (var cert in anchors)
+                if (!CertAddCertificateContextToStore(roots, cert.Handle, 4, IntPtr.Zero)) throw NativeError();
+            foreach (var cert in supplied)
+                if (!CertAddCertificateContextToStore(extra, cert.Handle, 4, IntPtr.Zero)) throw NativeError();
+            var config = new ChainEngineConfig { Size = Marshal.SizeOf<ChainEngineConfig>(),
+                ExclusiveRoot = roots.DangerousGetHandle(), ExclusiveFlags = 1 };
+            if (!CertCreateCertificateChainEngine(ref config, out var engine)) throw NativeError();
+            using (engine)
             {
-                var error = NativeError();
-                store?.Dispose();
-                throw error;
+                // For an HTTP RA, require the enrollment-agent EKU on the leaf and throughout its certification path.
+                using var oid = new NativeBuffer(ScepTester.AgentOid.Length + 1);
+                var bytes = Encoding.ASCII.GetBytes(ScepTester.AgentOid + "\0");
+                Marshal.Copy(bytes, 0, oid.Pointer, bytes.Length);
+                using var pointer = new NativeBuffer(IntPtr.Size);
+                Marshal.WriteIntPtr(pointer.Pointer, oid.Pointer);
+                var now = DateTime.Now;
+                return supplied.Where(cert =>
+                {
+                    if (cert.NotBefore > now || now > cert.NotAfter) return false;
+                    var options = new ChainParameters { Size = Marshal.SizeOf<ChainParameters>() };
+                    var eku = cert.Extensions.OfType<X509EnhancedKeyUsageExtension>().FirstOrDefault();
+                    if (!ScepTester.IsCa(cert) && (requireAgentUsage || eku != null))
+                    {
+                        if (eku == null || !eku.EnhancedKeyUsages.Cast<Oid>()
+                            .Any(usage => usage.Value == ScepTester.AgentOid)) return false;
+                        options.Usage.Usage = new PointerArray { Count = 1, Items = pointer.Pointer };
+                    }
+                    // Disable AIA and root updates during this local verification of the advertised certificates.
+                    if (!CertGetCertificateChain(engine.DangerousGetHandle(), cert.Handle, IntPtr.Zero, extra,
+                        ref options, 0x2104, IntPtr.Zero, out var chain)) throw NativeError();
+                    using (chain) return Read<ChainArray>(chain.DangerousGetHandle()).Trust.Errors == 0;
+                }).ToArray();
+            }
+        }
+
+        internal static List<byte[]> RetrieveCrls(string url, bool offline, int timeoutSeconds,
+            CancellationToken token = default, NetworkAccess network = null)
+        {
+            // CryptoAPI owns the Windows URL cache and non-HTTP providers. Override only explicit online HTTP reads.
+            const int limit = 100 * 1024 * 1024;
+            token.ThrowIfCancellationRequested();
+            network ??= NetworkAccess.Current;
+            SafeStore store;
+            if (!offline && network.Setting != NetworkAccess.SystemProxy && Uri.TryCreate(url, UriKind.Absolute,
+                out var uri) && uri.Scheme is "http" or "https")
+            {
+                var bytes = network.Fetch(uri, timeoutSeconds, limit, token, redirects: true).Body;
+                var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                try
+                {
+                    // Decode standalone CRLs and PKCS #7 stores without installing or caching their contents.
+                    var blob = new Blob { Size = bytes.Length, Data = pinned.AddrOfPinnedObject() };
+                    if (!CryptQueryObject(2, ref blob, (1 << 3) | (1 << 8), 14, 0, IntPtr.Zero, IntPtr.Zero,
+                        IntPtr.Zero, out store, IntPtr.Zero, IntPtr.Zero))
+                    {
+                        var error = NativeError();
+                        store?.Dispose();
+                        throw error;
+                    }
+                }
+                finally { pinned.Free(); }
+            }
+            else
+            {
+                var options = new RetrievalOptions { Size = Marshal.SizeOf<RetrievalOptions>(), MaximumBytes = limit };
+                if (!CryptRetrieveObjectByUrl(url, new IntPtr(2), offline ? 3u : 13u, timeoutSeconds * 1000,
+                    out store, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, ref options))
+                {
+                    var error = NativeError();
+                    store?.Dispose();
+                    throw error;
+                }
             }
             using (store)
             {
@@ -558,6 +631,13 @@ namespace Certitude
             public int Type; public PointerArray Usage;
         }
         [StructLayout(LayoutKind.Sequential)]
+        private struct ChainEngineConfig
+        {
+            public int Size; public IntPtr RestrictedRoot, RestrictedTrust, RestrictedOther; public int AdditionalCount;
+            public IntPtr AdditionalStores; public uint Flags, Timeout, CachedCertificates, CycleDetection;
+            public IntPtr ExclusiveRoot, ExclusiveTrustedPeople; public uint ExclusiveFlags;
+        }
+        [StructLayout(LayoutKind.Sequential)]
         private struct ChainParameters
         {
             public int Size; public UsageMatch Usage, Issuance; public int Timeout, CheckFreshness, Freshness; public IntPtr CacheResync, StrongSign; public int StrongSignFlags;
@@ -617,12 +697,22 @@ namespace Certitude
             protected override bool ReleaseHandle() => CertFreeCRLContext(handle);
         }
 
+        private sealed class SafeChainEngine : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeChainEngine() : base(true) { }
+            protected override bool ReleaseHandle() { CertFreeCertificateChainEngine(handle); return true; }
+        }
+
         private sealed class SafeChain : SafeHandleZeroOrMinusOneIsInvalid
         {
             public SafeChain() : base(true) { }
             protected override bool ReleaseHandle() { CertFreeCertificateChain(handle); return true; }
         }
 
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CryptQueryObject(int type, ref Blob blob, int content, int formats, int flags,
+            IntPtr encoding, IntPtr actualContent, IntPtr actualFormat, out SafeStore store,
+            IntPtr message, IntPtr context);
         [DllImport("crypt32.dll", SetLastError = true)]
         private static extern SafeStore CertOpenStore(IntPtr provider, int encoding, IntPtr cryptProvider,
             int flags, IntPtr parameter);
@@ -642,6 +732,11 @@ namespace Certitude
         private static extern bool CertCompareCertificateName(int encoding, ref Blob first, ref Blob second);
         [DllImport("crypt32.dll", SetLastError = true)]
         private static extern IntPtr CertEnumCRLsInStore(SafeStore store, IntPtr previous);
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CertCreateCertificateChainEngine(ref ChainEngineConfig config,
+            out SafeChainEngine engine);
+        [DllImport("crypt32.dll")]
+        private static extern void CertFreeCertificateChainEngine(IntPtr engine);
         [DllImport("crypt32.dll", SetLastError = true)]
         private static extern bool CertGetCertificateChain(IntPtr engine, IntPtr certificate, IntPtr time,
             SafeStore store, ref ChainParameters options, uint flags, IntPtr reserved, out SafeChain chain);

@@ -14,7 +14,7 @@ $targets = Join-Path $output 'Checks.targets'
 $source = [Security.SecurityElement]::Escape((Join-Path $PSScriptRoot '*.cs'))
 [IO.File]::WriteAllText($targets, "<Project><ItemGroup><Compile Include=`"$source`" /></ItemGroup></Project>")
 
-# Compile the real application sources with an offline test entry point in an isolated output directory.
+# Compile the application sources with a loopback and UI test entry point in an isolated output directory.
 & $MSBuild "$repository\Code\Certitude.csproj" /nologo /verbosity:minimal /m `
     /p:Configuration=Debug /p:Platform=x64 /p:StartupObject=Certitude.WorkflowChecks /warnaserror `
     "/p:CustomAfterMicrosoftCommonTargets=$targets" "/p:OutputPath=$output\bin\" `
@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Workflow check build failed.' }
 $process = Start-Process "$output\bin\Certitude.exe" -ArgumentList "`"$repository`"" -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput "$output\checks.txt" -RedirectStandardError "$output\errors.txt"
 $null = $process.Handle
-if (!$process.WaitForExit(60000))
+if (!$process.WaitForExit(120000))
 {
     $process.Kill()
     throw 'Workflow checks exceeded the unattended execution limit.'

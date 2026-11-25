@@ -148,7 +148,7 @@ Licensed under GPLv3. See LICENSE.md.
             <Button x:Name="CrlHealthButton" Content="CRL _Health" Click="CrlHealthClick"
                     IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Check}" />
             <Button x:Name="ToolsButton" Content="Advanced _Tools" Click="ToolsClick"
-                    IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.More}" />
+                    local:Glyphs.Icon="{x:Static local:Glyphs.More}" />
             <Button x:Name="StatisticsButton" Content="_Statistics" Click="StatisticsClick"
                     IsEnabled="False" local:Glyphs.Icon="{x:Static local:Glyphs.Statistics}" />
             <Button x:Name="NativeCaButton" Content="CA MMC" Click="NativeCaClick"

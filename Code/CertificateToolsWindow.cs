@@ -12,7 +12,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Threading;
@@ -54,7 +53,7 @@ namespace Certitude
         private TextBox serverName;
         private TextBox expected;
         private TextBox timeout;
-        private CheckBox checkRevocation;
+        private CheckBox checkRevocation, directTls;
         private TextBox subject;
         private TextBox dns;
         private TextBox ips;
@@ -128,20 +127,6 @@ namespace Certitude
             return page;
         }
 
-        private static void Label(Panel panel, string label, FrameworkElement control)
-        {
-            // Align labeled controls along the bottom of a wrapping form row.
-            var field = new StackPanel { Width = control.Width, Margin = new Thickness(0, 0, 8, 4),
-                VerticalAlignment = VerticalAlignment.Bottom };
-            var caption = Glyphs.Label(label);
-            caption.Target = control;
-            AutomationProperties.SetLabeledBy(control, caption);
-            caption.Margin = new Thickness(0, 0, 0, 3);
-            field.Children.Add(caption);
-            field.Children.Add(control);
-            panel.Children.Add(field);
-        }
-
         private static CheckBox Check(Panel panel, string caption, bool value = false)
         {
             // Add a consistently spaced, title-cased option to the form.
@@ -203,8 +188,8 @@ namespace Certitude
             var page = Page("_Windows stores / files", header);
             var choose = new WrapPanel();
             header.Children.Add(choose);
-            Label(choose, "Store location", location);
-            Label(choose, "Store (My = Personal)", storeName);
+            Dialogs.StackedField(choose, "Store location", location);
+            Dialogs.StackedField(choose, "Store (My = Personal)", storeName);
             Dialogs.Button(choose, "_Load store", async () => await Reload())
                 .VerticalAlignment = VerticalAlignment.Bottom;
             Dialogs.Button(choose, "_Open file…", async () => await OpenFile())
@@ -216,9 +201,9 @@ namespace Certitude
             // Place text, expiry, and private-key filters above the inventory actions.
             var filters = new WrapPanel { Margin = new Thickness(0, 6, 0, 9) };
             header.Children.Add(filters);
-            Label(filters, "Search subject, SAN, issuer, EKU or thumbprint", search);
-            Label(filters, "Expiry", validity);
-            Label(filters, "Private key association", keys);
+            Dialogs.StackedField(filters, "Search subject, SAN, issuer, EKU or thumbprint", search);
+            Dialogs.StackedField(filters, "Expiry", validity);
+            Dialogs.StackedField(filters, "Private key association", keys);
 
             // Expose certificate details, native viewing, validation, and export actions.
             var actions = inventoryActions;
@@ -737,24 +722,27 @@ namespace Certitude
             // Collect the connection address, TLS server name, and timeout for the endpoint check.
             var header = new StackPanel();
             var page = Page("_TLS endpoint", header);
-            Dialogs.Note(header, "Check the certificate a service currently presents. " +
-                "Use a direct TLS port such as HTTPS 443 or LDAPS 636.");
+            Dialogs.Note(header, "Check the certificate presented on a TLS port such as HTTPS 443 or LDAPS 636. " +
+                "Use a direct connection to verify the service binding.");
             var fields = new WrapPanel();
             header.Children.Add(fields);
             endpoint = new TextBox { Width = 235 };
             port = new TextBox { Text = "443", Width = 75 };
             serverName = new TextBox { Width = 235 };
             timeout = new TextBox { Text = "15", Width = 75 };
-            Label(fields, "Connect to DNS name / IP", endpoint);
-            Label(fields, "Port", port);
-            Label(fields, "SNI / expected name (optional)", serverName);
-            Label(fields, "Timeout (s)", timeout);
+            Dialogs.StackedField(fields, "Connect to DNS name / IP", endpoint);
+            Dialogs.StackedField(fields, "Port", port);
+            Dialogs.StackedField(fields, "SNI / expected name (optional)", serverName);
+            Dialogs.StackedField(fields, "Timeout (s)", timeout);
 
             // Allow expected-certificate comparison and Windows revocation checking.
-            expected = Dialogs.Field(header, "Expected SHA-1 or SHA-256 thumbprint (optional; verifies deployment)");
+            expected = Dialogs.Field(header, "Expected SHA-1 or SHA-256 Thumbprint (Optional)");
             var options = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
             header.Children.Add(options);
             checkRevocation = Check(options, "Check revocation with Windows", true);
+            directTls = Check(options, "Bypass Manual Proxy for This Check");
+            directTls.Loaded += (sender, args) => directTls.Visibility = NetworkAccess.Current.Address == null ?
+                Visibility.Collapsed : Visibility.Visible;
 
             // Expose endpoint validation and deeper certificate revocation diagnostics.
             var actions = new WrapPanel();
@@ -789,10 +777,11 @@ namespace Certitude
             var name = serverName.Text;
             var hash = expected.Text;
             var revocation = checkRevocation.IsChecked == true;
+            var direct = directTls.IsChecked == true;
 
             // Run the TLS probe asynchronously and summarize validation and fingerprint matching.
             tlsResult = await Task.Run(() => CertificateUtilities.Probe(host, targetPort, name,
-                revocation, seconds, hash, token, oids), token);
+                revocation, seconds, hash, token, oids, direct), token);
             var report = tlsResult.Report;
             TimeDisplay.Text(tlsOutput, () => report.ToString());
             status.Text = tlsResult.HandshakeCompleted ?
@@ -845,9 +834,9 @@ namespace Certitude
             ips = new TextBox { Width = 180, Height = 50, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             algorithm = new ComboBox { Width = 165, SelectedIndex = 1,
                 ItemsSource = new[] { "RSA 2048", "RSA 3072", "RSA 4096", "ECDSA P-256", "ECDSA P-384" } };
-            Label(names, "DNS SANs (one per line)", dns);
-            Label(names, "IP SANs (one per line)", ips);
-            Label(names, "Key", algorithm);
+            Dialogs.StackedField(names, "DNS SANs (one per line)", dns);
+            Dialogs.StackedField(names, "IP SANs (one per line)", ips);
+            Dialogs.StackedField(names, "Key", algorithm);
 
             // Collect key storage, exportability, usage, and template settings.
             var options = new WrapPanel();
