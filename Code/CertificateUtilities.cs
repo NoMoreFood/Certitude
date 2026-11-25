@@ -5,15 +5,19 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -200,21 +204,6 @@ namespace Certitude
             return bytes;
         }
 
-        public static List<InventoryCertificate> ReadFile(byte[] bytes, string password, CancellationToken token,
-            OidNames names = null)
-        {
-            // Inspect file contents with ephemeral keys so reading a PFX does not persist them.
-            names = names?.Refresh() ?? OidNames.Local;
-            token.ThrowIfCancellationRequested();
-            var certificates = new X509Certificate2Collection();
-            try
-            {
-                certificates.Import(DecodePublicPem(bytes), password, X509KeyStorageFlags.EphemeralKeySet);
-                return DescribeAll(certificates, token, names);
-            }
-            finally { foreach (var certificate in certificates) certificate.Dispose(); }
-        }
-
         internal static byte[] ReadEncoded(string path, int maximumMegabytes = 32, CancellationToken token = default) =>
             DecodeObject(ReadBytes(path, maximumMegabytes, token));
 
@@ -235,7 +224,7 @@ namespace Certitude
             return Convert.FromBase64String(match.Groups[2].Value);
         }
 
-        private static List<InventoryCertificate> DescribeAll(X509Certificate2Collection certificates,
+        internal static List<InventoryCertificate> DescribeAll(X509Certificate2Collection certificates,
             CancellationToken token, OidNames names)
         {
             // Describe certificates with cancellation support and order them by expiration.
@@ -265,6 +254,9 @@ namespace Certitude
 
         public static byte[] DecodePublicPem(byte[] bytes)
         {
+            // Binary certificates, chains and PFX files begin with an ASN.1 sequence.
+            if (bytes.Length > 0 && bytes[0] == 0x30) return bytes;
+
             // Recognize public PEM blocks while rejecting unsupported private-key PEM input.
             using var reader = new StreamReader(new MemoryStream(bytes), Encoding.ASCII, true);
             var text = reader.ReadToEnd().Trim();
@@ -463,12 +455,33 @@ namespace Certitude
             finally { foreach (var certificate in collection) certificate.Dispose(); }
         }
 
-        public static void WriteAtomic(string path, byte[] bytes)
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileEx(string source, string destination, uint flags);
+
+        public static void WriteAtomic(string path, byte[] bytes, bool privateKey = false)
         {
             // Write beside the destination and replace it only after the complete file is ready.
             var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
+                if (privateKey)
+                {
+                    // Keep the owner's private ACL through publication, including when replacing a shared file.
+                    using var identity = WindowsIdentity.GetCurrent();
+                    var security = new FileSecurity();
+                    security.SetAccessRuleProtection(true, false);
+                    security.AddAccessRule(new FileSystemAccessRule(identity.User, FileSystemRights.FullControl,
+                        AccessControlType.Allow));
+
+                    // Write directly from the caller's clearable buffer.
+                    using (var stream = new FileStream(temporary, FileMode.CreateNew, FileSystemRights.Write,
+                        FileShare.None, 1, FileOptions.None, security))
+                        stream.Write(bytes, 0, bytes.Length);
+                    const uint replaceExisting = 1;
+                    if (!MoveFileEx(temporary, path, replaceExisting))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    return;
+                }
                 File.WriteAllBytes(temporary, bytes);
                 if (File.Exists(path)) File.Replace(temporary, path, null);
                 else File.Move(temporary, path);

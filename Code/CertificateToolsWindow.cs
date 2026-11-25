@@ -43,6 +43,7 @@ namespace Certitude
             { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 4) };
         private readonly DispatcherTimer searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         private List<InventoryCertificate> rows = new List<InventoryCertificate>();
+        private CertificateFile loadedFile;
         private StoreLocation loadedLocation;
         private string loadedStore;
         private CancellationTokenSource cancellation;
@@ -100,6 +101,7 @@ namespace Certitude
             keys.SelectionChanged += (sender, e) => ApplyFilters();
             location.SelectionChanged += (sender, e) => SourceChanged();
             storeName.SelectionChanged += (sender, e) => SourceChanged();
+            Closed += () => SetFile(null);
             Closing += (sender, e) =>
             {
                 // Cancel active work before allowing the certificate workspace to close.
@@ -357,9 +359,17 @@ namespace Certitude
         private StoreLocation Location =>
             location.SelectedIndex == 0 ? StoreLocation.LocalMachine : StoreLocation.CurrentUser;
 
+        private void SetFile(CertificateFile file)
+        {
+            // Release the previous file's ephemeral keys when its inventory is replaced or closed.
+            loadedFile?.Dispose();
+            loadedFile = file;
+        }
+
         private async void SourceChanged()
         {
             // Clear the inventory immediately when the selected store or location changes.
+            SetFile(null);
             rows.Clear();
             loadedStore = null;
             source.Text = "";
@@ -380,6 +390,7 @@ namespace Certitude
             {
                 // Replace inventory rows only after the complete store lookup finishes.
                 rows = await Task.Run(() => CertificateUtilities.ReadStore(target, name, token, oids), token);
+                SetFile(null);
                 loadedLocation = target;
                 loadedStore = name;
                 source.Text = Environment.MachineName + " · " + target + "\\" + name;
@@ -414,31 +425,41 @@ namespace Certitude
             var target = Location;
             var name = (string)storeName.SelectedItem;
             var imported = false;
-            await Run(import ? "Reading import file…" : "Opening certificate file…", async token =>
+            byte[] input = null;
+            var operation = Run(import ? "Reading import file…" : "Opening certificate file…", async token =>
             {
                 // Decode the bundle in memory before any certificates or keys are installed.
-                var bytes = await ReadInput(open.FileName, token);
+                input = await ReadInput(open.FileName, token);
+                var (encoded, pfx) = await Task.Run(() =>
+                {
+                    var decoded = CertificateUtilities.DecodePublicPem(input);
+                    return (decoded, X509Certificate2.GetCertContentType(decoded) == X509ContentType.Pkcs12);
+                }, token);
                 var password = "";
-                var pfx = await Task.Run(() => X509Certificate2.GetCertContentType(
-                    CertificateUtilities.DecodePublicPem(bytes)) == X509ContentType.Pkcs12, token);
                 token.ThrowIfCancellationRequested();
                 if (pfx)
                 {
                     password = await Password(import ? "Import PFX" : "Open PFX", false);
                     if (password == null) return;
                 }
-                var preview = await Task.Run(() => CertificateUtilities.ReadFile(bytes, password, token, oids), token);
+                var file = await Task.Run(() => new CertificateFile(encoded, password, token, oids,
+                    pfx && !import ? open.FileName : null), token);
+                var preview = file.Rows;
 
                 // Show decoded file contents as a read-only inventory with no store association.
                 if (!import)
                 {
+                    SetFile(file);
                     rows = preview;
                     loadedStore = null;
                     source.Text = "File: " + open.FileName + " · read only";
                     ApplyFilters();
-                    status.Text = "File loaded. Private keys were opened in memory; nothing was installed.";
+                    status.Text = pfx && preview.Any(row => row.HasPrivateKey) ?
+                        "PFX opened in memory. Select a certificate with a private key and choose Export." :
+                        "File opened for inspection.";
                     return;
                 }
+                file.Dispose();
 
                 // Explain the exact destination and trust impact in the import review page.
                 var dialog = new WorkspacePage { Owner = this, Title = "Review Certificate Import" };
@@ -471,12 +492,16 @@ namespace Certitude
                 // Import the reviewed bundle with the chosen key policy and show per-certificate results.
                 var canExport = allowExport.IsChecked == true;
                 var report = await Task.Run(() =>
-                    CertificateUtilities.Import(bytes, password, target, name, canExport, token));
+                    CertificateUtilities.Import(encoded, password, target, name, canExport, token));
                 imported = true;
                 record(report);
                 Dialogs.Report(this, "Import results", report);
                 status.Text = "Import finished. Review individual results for failures or cancellation.";
             });
+
+            // A PFX can contain unencrypted key bags even when its integrity is password-protected.
+            try { await operation; }
+            finally { if (input != null) Array.Clear(input, 0, input.Length); }
             if (imported) await Reload();
         }
 
@@ -648,31 +673,50 @@ namespace Certitude
 
         private Task Export() => Run("Exporting certificate…", async token =>
         {
-            // Choose an export format for a nonempty certificate selection.
+            // Offer private formats only for a single certificate with a key in the current source.
             var selected = inventory.SelectedItems.Cast<InventoryCertificate>().ToArray();
             if (selected.Length == 0) throw new ArgumentException("Select certificates to export.");
-            var save = await FilePicker.ChooseSave(this, "certificate.cer",
-                "DER certificate (one)|*.cer|PEM certificate(s)|*.pem|" +
-                "PKCS #7 certificate(s)|*.p7b|PFX with private key (one)|*.pfx");
+            var row = selected.Length == 1 ? selected[0] : null;
+            var fileKey = loadedFile?.KeyCertificate(row);
+            var traditional = CertificateFile.TraditionalFormat(fileKey);
+            var filter = "DER Certificate (One)|*.cer|PEM Certificate(s)|*.pem|PKCS #7 Certificate(s)|*.p7b";
+            if (row?.HasPrivateKey == true && (loadedStore != null || fileKey != null))
+                filter += "|PFX With Private Key|*.pfx;*.p12";
+            if (traditional != null)
+                filter += "|PKCS #8 Key (PEM, Unencrypted)|*.key;*.pem|PKCS #8 Key (DER, Unencrypted)|*.p8;*.der" +
+                    $"|{traditional} Key (PEM, Unencrypted)|*.key;*.pem|{traditional} Key (DER, Unencrypted)|*.der";
+            var save = await FilePicker.ChooseSave(this, "certificate.cer", filter);
             if (save == null) return;
-            byte[] bytes;
-            if (save.FilterIndex == 4)
+            if (string.Equals(loadedFile?.PfxPath, save.FileName, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Choose a destination different from the open PFX file.");
+            var format = (CertificateExportFormat)save.FilterIndex;
+            if (format >= CertificateExportFormat.Pkcs8Pem)
             {
-                // Require one installed private key and a confirmed password for PFX export.
-                if (loadedStore == null || selected.Length != 1 || !selected[0].HasPrivateKey)
-                    throw new ArgumentException("Select one certificate with a private key in a loaded Windows store.");
+                // Write the selected private key on a worker and release plaintext buffers before returning.
+                await Task.Run(() => CertificateFile.WritePrivateKey(fileKey, format, save.FileName, token), token);
+                status.Text = "Exported the unencrypted private key to " + save.FileName;
+                return;
+            }
+
+            // Export one password-protected identity or the selected public certificates.
+            byte[] bytes;
+            if (format == CertificateExportFormat.Pfx)
+            {
                 var password = await Password("Protect the exported PFX", true);
                 if (password == null) return;
-                bytes = await Task.Run(() => CertificateUtilities.WithCertificate(loadedLocation, loadedStore,
-                    selected[0].Thumbprint, false, (store, certificate) =>
-                        certificate.Export(X509ContentType.Pfx, password)), token);
+                bytes = await Task.Run(() => fileKey?.Export(X509ContentType.Pfx, password) ??
+                    CertificateUtilities.WithCertificate(loadedLocation, loadedStore, row.Thumbprint, false,
+                        (store, certificate) => certificate.Export(X509ContentType.Pfx, password)), token);
             }
-            // Write the export atomically and clear private-key export bytes from memory afterward.
             else bytes = CertificateUtilities.ExportPublic(selected.Select(row => row.Encoded), save.FilterIndex - 1);
-            try { CertificateUtilities.WriteAtomic(save.FileName, bytes); }
-            finally { if (save.FilterIndex == 4) Array.Clear(bytes, 0, bytes.Length); }
-            status.Text = "Exported " + save.FileName +
-                (save.FilterIndex == 4 ? " (selected certificate and key; no issuer chain)." : ".");
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                CertificateUtilities.WriteAtomic(save.FileName, bytes);
+            }
+            finally { if (format == CertificateExportFormat.Pfx) Array.Clear(bytes, 0, bytes.Length); }
+            status.Text = (format == CertificateExportFormat.Pfx ?
+                "Exported the selected certificate and its private key to " : "Exported ") + save.FileName;
         });
 
         private async Task<string> Password(string title, bool confirm)

@@ -37,17 +37,21 @@ namespace Certitude
             string Pem(string label, byte[] bytes) => "-----BEGIN " + label + "-----\r\n" +
                 Convert.ToBase64String(bytes, Base64FormattingOptions.InsertLineBreaks) +
                 "\r\n-----END " + label + "-----\r\n";
+            int BundleCount(byte[] bytes)
+            {
+                using var file = new CertificateFile(CertificateUtilities.DecodePublicPem(bytes), null,
+                    CancellationToken.None, OidNames.Windows);
+                return file.Rows.Count;
+            }
             var certificate = Pem("CERTIFICATE", fixtures["ca"]);
             var bundle = Encoding.ASCII.GetBytes(certificate + Pem("CERTIFICATE", fixtures["sample"]));
-            Assert(CertificateUtilities.ReadFile(bundle, null, CancellationToken.None, OidNames.Windows).Count == 2,
-                "A public PEM bundle must retain both certificates.");
+            Assert(BundleCount(bundle) == 2, "A public PEM bundle must retain both certificates.");
             var chain = Encoding.ASCII.GetBytes(Pem("PKCS7", CertificateUtilities.DecodePublicPem(bundle)));
-            Assert(CertificateUtilities.ReadFile(chain, null, CancellationToken.None, OidNames.Windows).Count == 2,
-                "A PKCS #7 PEM chain must retain both certificates.");
+            Assert(BundleCount(chain) == 2, "A PKCS #7 PEM chain must retain both certificates.");
             foreach (var encoding in new[] { new UTF8Encoding(true), Encoding.Unicode, Encoding.BigEndianUnicode })
             {
                 var encoded = encoding.GetPreamble().Concat(encoding.GetBytes(Encoding.ASCII.GetString(bundle))).ToArray();
-                Assert(CertificateUtilities.ReadFile(encoded, null, CancellationToken.None, OidNames.Windows).Count == 2,
+                Assert(BundleCount(encoded) == 2,
                     "A byte-order mark must not bypass complete PEM bundle inspection.");
             }
             foreach (var malformed in new[] { certificate + "-----BEGIN CERTIFICATE-----\r\nAA==",
@@ -284,6 +288,9 @@ namespace Certitude
                 File.WriteAllBytes(bundlePath, bundle.Export(X509ContentType.Pkcs7));
             }
             window.ShowPage(manager);
+            CheckPfxExport(window, manager, output);
+            var pfx = (CertificateFile)Field(manager, "loadedFile");
+            var keyRow = pfx.Rows.First(row => row.HasPrivateKey);
             foreach (var import in new[] { false, true })
             {
                 var previous = Field(manager, "rows");
@@ -298,6 +305,7 @@ namespace Certitude
                     "Opening a bundle did not produce a read-only inventory of both certificates.");
                 if (import) Assert(ReferenceEquals(previous, Field(manager, "rows")),
                     "Cancelling import changed the displayed inventory.");
+                else Assert(pfx.KeyCertificate(keyRow) == null, "Opening another file retained the previous PFX key.");
 
                 async Task CancelImport()
                 {
